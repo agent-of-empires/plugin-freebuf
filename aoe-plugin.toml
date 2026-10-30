@@ -10,17 +10,38 @@ name = "Freebuf"
 version = "0.1.0"
 # Manifest schema / host API version. The host rejects a manifest whose
 # api_version it does not support.
-api_version = 6
+api_version = 19
 # Host-app compatibility range (a different axis from api_version). The host
 # refuses install/update outside this range. Requires api_version >= 4.
 aoe_version = ">=1.11.0, <2.0.0"
 description = "An Agent of Empires plugin for the FreeBuff coding agent."
 
 # Capability grants are prompted at install and pinned to the manifest hash.
-# Declare only what the worker actually uses. `runtime.worker` is required to run
-# any plugin code at all. Add more (net, session.read, notifications, ...) as the
-# worker grows; see the capability table in the plugin API reference.
-capabilities = ["runtime.worker"]
+# Declare only what the worker actually uses. `runtime.worker` runs the worker;
+# `session.integration` enables provider-native status (api_version >= 19); the
+# worker reads Freebuff's local state to decide status (`fs.read`), enumerates
+# freebuff sessions to heartbeat (`session.read`), and writes the status report
+# into the host's per-instance hook directory (`fs.write`). See the capability
+# table in the plugin API reference.
+capabilities = ["runtime.worker", "session.integration", "session.read", "fs.read", "fs.write"]
+
+# Agent launch + native status. The host contributes `freebuff` to the agent
+# picker, `aoe agents`, and `session.default_tool`, and the worker heartbeats a
+# status-only AgentIntegrationSnapshot for each freebuff session (running/idle
+# from Freebuff's local chat activity). Exactly one block; this schema is
+# deny_unknown_fields and accepts only `tool`, `provider_versions`, `command`,
+# `replies` -- `resume_arg` (as plugin-omp declares it) is not part of it and
+# would fail manifest parsing.
+# `provider_versions` is required (nonempty) whenever `session.integration` is
+# declared, and every report's `provider_version` must match one of these
+# ranges or the host rejects it and falls back to pane detection.
+# `replies` stays false: replies gate the provider-native prompt contract
+# (AgentIntegrationReply), which needs an in-process extension hook Freebuff's
+# CLI does not expose, so the host drops any prompt and offers no native reply.
+[[agent_integrations]]
+tool = "freebuff"
+provider_versions = [">=0.2.0, <1.0.0"]
+command = "freebuff"
 
 # Commands the plugin contributes (palette / CLI), namespaced by the host as
 # plugin.dev.example.aoe-freebuf.<id>. The command-id -> worker RPC mapping
