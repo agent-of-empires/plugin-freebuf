@@ -1,0 +1,26 @@
+{
+  "name": "freebuff-acp-adapter",
+  "version": "0.1.0",
+  "description": "Experimental ACP adapter that bridges the Freebuff TUI to ACP over stdio.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "license": "MIT",
+  "private": true,
+  "bin": {
+    "freebuff-acp-adapter": "src/cli.ts"
+  },
+  "scripts": {
+    "start": "node src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^2.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}
