@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { heartbeat, processLine, sendRequest, setOutbound } from "../src/index";
+import { FLAG_TTL_MS, heartbeat, processLine, sendRequest, setOutbound } from "../src/index";
 
 const cleanups: string[] = [];
 
@@ -53,91 +53,138 @@ describe("worker/host multiplexing", () => {
   });
 });
 
-describe("status heartbeat", () => {
-  function fixture(): { configRoot: string; base: string } {
-    const configRoot = tempDir("freebuff-cfg-");
-    const base = tempDir("aoe-hooks-");
-    writeFileSync(path.join(configRoot, "freebuff-metadata.json"), JSON.stringify({ version: "0.2.35" }));
-    return { configRoot, base };
+describe("attention heartbeat", () => {
+  const WAITING = "╭──── Some questions for you ────╮\n│                      Close ✕ │";
+  const RUNNING = " working...      1m 33s   ■ Esc\n ❯ ▍Add to the current task";
+  const IDLE = " ❯ ▍Add to the current task (/ for commands)\n ← for history · ? for help";
+
+  function flag(hookBase: string, id: string): Record<string, unknown> | null {
+    const file = path.join(hookBase, id, "attention.json");
+    return existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>) : null;
   }
 
-  function addChat(configRoot: string, project: string, ageMs: number): void {
-    const dir = path.join(configRoot, "projects", project, "chats", "2026-10-30T12-00-00.000Z");
-    mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, "log.jsonl");
-    writeFileSync(file, "{}");
-    const when = new Date(Date.now() - ageMs);
-    utimesSync(file, when, when);
+  function report(hookBase: string, id: string): Record<string, unknown> | null {
+    const file = path.join(hookBase, id, "integration-dev.example.aoe-freebuf.json");
+    return existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>) : null;
   }
 
-  it("writes running/idle reports for freebuff sessions and skips everything else", async () => {
-    const { configRoot, base } = fixture();
-    addChat(configRoot, "proj-live", 0);
-    addChat(configRoot, "proj-stale", 10 * 60_000);
-
+  /** Answer the tick's sessions.list and run it against stubbed panes. */
+  async function runTick(
+    sessions: Array<Record<string, unknown>>,
+    panes: Record<string, string | null>,
+  ): Promise<{ sent: string[]; hookBase: string; now: number }> {
+    const hookBase = tempDir("aoe-hooks-");
+    const now = 1_700_000_000_000;
     const sent: string[] = [];
     setOutbound((line) => sent.push(line));
-    const tick = heartbeat({ configRoot, base });
+    const tick = heartbeat({
+      hookBase,
+      now,
+      capture: async (id) => panes[id] ?? null,
+    });
     expect(sent).toHaveLength(1);
     const request = JSON.parse(sent[0]) as { id: number };
-    expect(
-      processLine(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          id: request.id,
-          result: {
-            sessions: [
-              { id: "sess-live", tool: "freebuff", project_path: "/w/proj-live" },
-              { id: "sess-stale", tool: "freebuff", project_path: "/w/proj-stale" },
-              { id: "sess-other", tool: "claude", project_path: "/w/proj-live" },
-              { id: "sess-never", tool: "freebuff", project_path: "/w/proj-never" },
-            ],
-          },
-        }),
-      ),
-    ).toBeNull();
+    processLine(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { sessions } }));
     await tick;
+    return { sent, hookBase, now };
+  }
 
-    const read = (id: string) =>
-      JSON.parse(readFileSync(path.join(base, id, "integration-dev.example.aoe-freebuf.json"), "utf8")) as {
-        status: string;
-        instance_id: string;
-        provider_version: string;
-        provider_session_id: string;
-        writer_pid: number;
-      };
-    const live = read("sess-live");
-    expect(live.status).toBe("running");
-    expect(live.instance_id).toBe("sess-live");
-    expect(live.provider_version).toBe("0.2.35");
-    expect(live.provider_session_id).toBe("2026-10-30T12-00-00.000Z");
-    expect(live.writer_pid).toBe(process.pid);
-    expect(read("sess-stale").status).toBe("idle");
-    // No state / not our tool: no report, so the host keeps pane detection.
-    expect(() => read("sess-other")).toThrow();
-    expect(() => read("sess-never")).toThrow();
+  it("flags a session blocked on a question and clears the working and parked ones", async () => {
+    // Stale claims from an earlier tick: the running and idle sessions must lose them.
+    const { hookBase, now, sent } = await runTick(
+      [
+        { id: "sess-asking", tool: "freebuff" },
+        { id: "sess-working", tool: "freebuff" },
+        { id: "sess-idle", tool: "freebuff" },
+        { id: "sess-other", tool: "claude" },
+      ],
+      {
+        "sess-asking": WAITING,
+        "sess-working": RUNNING,
+        "sess-idle": IDLE,
+      },
+    );
+    expect(sent).toHaveLength(1); // the sessions.list request and nothing else on the wire
+
+    expect(flag(hookBase, "sess-asking")).toEqual({
+      urgent: true,
+      urgent_expires_at: Math.floor((now + FLAG_TTL_MS) / 1000),
+    });
+    expect(flag(hookBase, "sess-working")).toBeNull();
+    expect(flag(hookBase, "sess-idle")).toBeNull();
+    expect(flag(hookBase, "sess-other")).toBeNull(); // another tool's session is not ours
+
+    // Forward compatible: the same classification lands in the api_version-19
+    // report, which an older host ignores and a newer one reads as the row status.
+    expect(report(hookBase, "sess-asking")).toMatchObject({ schema_version: 1, status: "waiting", revision: 0 });
+    expect(report(hookBase, "sess-working")).toMatchObject({ status: "running" });
+    expect(report(hookBase, "sess-idle")).toMatchObject({ status: "idle" });
+    expect(report(hookBase, "sess-other")).toBeNull();
   });
 
-  it("claims nothing when the runtime version is unknown", async () => {
-    const { configRoot, base } = fixture();
-    rmSync(path.join(configRoot, "freebuff-metadata.json"));
-    addChat(configRoot, "proj-live", 0);
+  it("lowers a raised flag once the dialog is gone", async () => {
+    const hookBase = tempDir("aoe-hooks-");
+    const dir = path.join(hookBase, "sess-asking");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "attention.json"), JSON.stringify({ urgent: true, urgent_expires_at: 9_999_999_999 }));
 
     const sent: string[] = [];
     setOutbound((line) => sent.push(line));
-    await heartbeat({ configRoot, base });
-    expect(sent).toHaveLength(0); // never even lists sessions
+    const tick = heartbeat({ hookBase, now: 1_700_000_000_000, capture: async () => IDLE });
+    const request = JSON.parse(sent[0]) as { id: number };
+    processLine(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { sessions: [{ id: "sess-asking", tool: "freebuff" }] } }));
+    await tick;
+
+    expect(flag(hookBase, "sess-asking")).toBeNull();
+  });
+
+  it("leaves the claim alone when the pane cannot be read", async () => {
+    const hookBase = tempDir("aoe-hooks-");
+    const dir = path.join(hookBase, "sess-asking");
+    mkdirSync(dir, { recursive: true });
+    const existing = JSON.stringify({ urgent: true, urgent_expires_at: 9_999_999_999 });
+    writeFileSync(path.join(dir, "attention.json"), existing);
+
+    const sent: string[] = [];
+    setOutbound((line) => sent.push(line));
+    // A failed capture says nothing about the screen, so the expiry decides.
+    const tick = heartbeat({ hookBase, now: 1_700_000_000_000, capture: async () => null });
+    const request = JSON.parse(sent[0]) as { id: number };
+    processLine(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { sessions: [{ id: "sess-asking", tool: "freebuff" }] } }));
+    await tick;
+
+    expect(readFileSync(path.join(dir, "attention.json"), "utf8")).toBe(existing);
   });
 
   it("survives the host not answering", async () => {
-    const { configRoot, base } = fixture();
     const sent: string[] = [];
     setOutbound((line) => sent.push(line));
-    const tick = heartbeat({ configRoot, base });
+    const tick = heartbeat({ hookBase: tempDir("aoe-hooks-"), capture: async () => WAITING });
     const request = JSON.parse(sent[0]) as { id: number };
     processLine(
       JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32000, message: "host unavailable" } }),
     );
     await expect(tick).resolves.toBeUndefined();
+  });
+
+  it("reports the probe result from the status command", () => {
+    const configRoot = tempDir("freebuff-cfg-");
+    writeFileSync(path.join(configRoot, "freebuff-metadata.json"), JSON.stringify({ version: "0.2.35" }));
+    const chat = path.join(configRoot, "projects", "proj-live", "chats", "2026-10-30T12-00-00.000Z");
+    mkdirSync(chat, { recursive: true });
+    writeFileSync(path.join(chat, "log.jsonl"), "{}");
+    const second = path.join(configRoot, "projects", "proj-stale", "chats", "2026-10-30T12-00-00.000Z");
+    mkdirSync(second, { recursive: true });
+    writeFileSync(path.join(second, "log.jsonl"), "{}");
+
+    const previous = process.env.FREEBUFF_CONFIG_DIR;
+    process.env.FREEBUFF_CONFIG_DIR = configRoot;
+    try {
+      const response = processLine(JSON.stringify({ jsonrpc: "2.0", id: 9, method: "aoe-freebuf.status", params: {} }));
+      expect(response?.result).toMatchObject({ ok: true, provider_version: "0.2.35", projects: 2, running: 2 });
+    } finally {
+      if (previous === undefined) delete process.env.FREEBUFF_CONFIG_DIR;
+      else process.env.FREEBUFF_CONFIG_DIR = previous;
+    }
   });
 });

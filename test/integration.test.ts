@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -26,7 +26,7 @@ describe("agent integration report", () => {
       instanceId: "sess-1",
       providerVersion: "0.2.35",
       providerSessionId: "2026-10-30T17-44-20.043Z",
-      status: "running",
+      status: "waiting",
       writerPid: 1234,
     });
     expect(snapshot).toEqual({
@@ -36,7 +36,7 @@ describe("agent integration report", () => {
       provider_session_id: "2026-10-30T17-44-20.043Z",
       writer_pid: 1234,
       revision: 0,
-      status: "running",
+      status: "waiting",
       reply_keys: [],
       prompt: null,
     });
@@ -73,14 +73,16 @@ describe("agent integration report", () => {
   it("creates the hook base directory 0700 when the host never did", () => {
     const parent = tempDir("hooks-parent-");
     const base = path.join(parent, "aoe-hooks-501");
-    const snapshot = buildSnapshot({
-      instanceId: "sess-2",
-      providerVersion: "0.2.35",
-      providerSessionId: "chat-2",
-      status: "running",
-      writerPid: process.pid,
-    });
-    writeReport(instanceHookDir("sess-2", base), snapshot);
+    writeReport(
+      instanceHookDir("sess-2", base),
+      buildSnapshot({
+        instanceId: "sess-2",
+        providerVersion: "0.2.35",
+        providerSessionId: "chat-2",
+        status: "running",
+        writerPid: process.pid,
+      }),
+    );
     expect(mode(base)).toBe("700");
     expect(mode(path.join(base, "sess-2"))).toBe("700");
   });
@@ -88,6 +90,7 @@ describe("agent integration report", () => {
   it("throws instead of writing when the instance path is not a directory", () => {
     const base = tempDir("hooks-parent-");
     const instanceDir = path.join(base, "sess-3");
+    mkdirSync(base, { recursive: true });
     writeFileSync(instanceDir, "not a directory");
     expect(() =>
       writeReport(

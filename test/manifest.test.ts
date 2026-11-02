@@ -2,7 +2,6 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { PLUGIN_ID } from "../src/integration";
 
 /**
  * Minimal, dependency-free TOML reader covering exactly the constructs the
@@ -114,41 +113,43 @@ function parseToml(source: string): Manifest {
   return manifest;
 }
 
-const ALLOWED_INTEGRATION_KEYS = new Set(["tool", "provider_versions", "command", "replies"]);
-
 describe("aoe-plugin.toml", () => {
   const manifest = parseToml(readFileSync(MANIFEST_PATH, "utf8"));
 
-  it("declares api_version 19", () => {
-    expect(manifest.root.api_version).toBe(19);
+  it("declares an api_version hosts actually parse", () => {
+    // 19 is the schema version that adds the agent-integration contract
+    // ([[agent_integrations]] + the session.integration capability). Until a
+    // released host parses that, declaring 19 here means a rejected manifest.
+    expect(manifest.root.api_version).toBe(18);
   });
 
-  it("declares exactly one agent integration for freebuff", () => {
-    const integrations = manifest.sections.agent_integrations ?? [];
-    expect(integrations).toHaveLength(1);
-    expect(integrations[0].tool).toBe("freebuff");
-    expect(integrations[0].command).toBe("freebuff");
-  });
-
-  it("uses only schema keys on each agent integration", () => {
-    for (const integration of manifest.sections.agent_integrations ?? []) {
-      const unsupported = Object.keys(integration).filter((key) => !ALLOWED_INTEGRATION_KEYS.has(key));
-      expect(unsupported).toEqual([]);
-    }
-  });
-
-  it("declares session.integration with the provider_versions that requires", () => {
+  it("declares no agent integration, which needs api_version 19", () => {
+    expect(manifest.sections.agent_integrations ?? []).toEqual([]);
     const capabilities = manifest.root.capabilities;
-    expect(capabilities).toEqual(expect.arrayContaining(["runtime.worker", "session.integration"]));
-    // The host rejects a manifest that declares session.integration without
-    // nonempty provider_versions on every agent integration entry.
-    for (const integration of manifest.sections.agent_integrations ?? []) {
-      expect(Array.isArray(integration.provider_versions)).toBe(true);
-      expect(integration.provider_versions).not.toEqual([]);
-    }
+    expect(Array.isArray(capabilities)).toBe(true);
+    expect(capabilities as Value[]).not.toContain("session.integration");
   });
 
-  it("matches the plugin id the report file is named after", () => {
-    expect(manifest.root.id).toBe(PLUGIN_ID);
+  it("declares the capabilities its worker uses and nothing else", () => {
+    // session.read lists sessions; process.spawn captures each pane;
+    // fs.read reads Freebuff's own state; fs.write raises the attention flag.
+    expect(manifest.root.capabilities).toEqual([
+      "runtime.worker",
+      "session.read",
+      "fs.read",
+      "fs.write",
+      "process.spawn",
+    ]);
+  });
+
+  it("asks for no row-column, since attention is carried by the host's flag", () => {
+    const slots = (manifest.sections.ui ?? []).map((entry) => entry.slot);
+    expect(slots).not.toContain("row-column");
+    expect(slots).toContain("pane");
+  });
+
+  it("stays in a namespace a community install may claim", () => {
+    // aoe.* and agent-of-empires.* are reserved for bundled/featured plugins.
+    expect(manifest.root.id).toBe("dev.example.aoe-freebuf");
   });
 });

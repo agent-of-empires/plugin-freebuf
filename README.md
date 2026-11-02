@@ -3,53 +3,74 @@
 An Agent of Empires plugin for the FreeBuff coding agent.
 
 An [Agent of Empires](https://github.com/agent-of-empires/agent-of-empires)
-plugin. It contributes a `status` command, one setting, a `pane` UI slot, and an
-agent integration for launching `freebuff`, backed by a worker that speaks
-JSON-RPC 2.0 over newline-delimited JSON on stdio.
+plugin. It contributes a `status` command, one setting, a `pane` UI slot, and a
+worker that speaks JSON-RPC 2.0 over newline-delimited JSON on stdio.
 
-## Agent integration
+## Session attention
 
-The manifest declares `api_version = 19` with exactly one `[[agent_integrations]]`
-block, `tool = "freebuff"`, `provider_versions = [">=0.2.0, <1.0.0"]`, and
-`command = "freebuff"`. Two things follow:
+Every 10 s, for each session whose tool is `freebuff`, the worker captures that
+session's pane with `aoe session capture` and classifies it the way the host
+classifies its built-in agents:
 
-- **Launch and discovery.** `freebuff` appears in AoE's agent picker, in
-  `aoe agents`, and as a candidate for `session.default_tool`; the host spawns
-  it via the declared command.
-- **Native session status (status-only).** For every session whose tool is
-  `freebuff`, the worker heartbeats a status-only `AgentIntegrationSnapshot`
-  every 5 seconds into the host's hook directory
-  (`/tmp/aoe-hooks-<euid>/<instance id>/integration-dev.example.aoe-freebuf.json`,
-  dir `0700`, file `0600`, refreshed well inside the host's 15-second freshness
-  window). The host uses it to set the session row's status directly.
-
-### How status is decided, and its limits
-
-The signal is Freebuff's own local state under `~/.config/manicode`: the worker
-stats the newest chat directory in `projects/<project>/chats/` for the
-session's `project_path` and maps it onto what it is willing to claim:
-
-| Local state | Reported | Why |
+| Pane | Class | Flag |
 |---|---|---|
-| chat files written within 30 s | `running` | the runtime rewrites them while it works |
-| chat files older than 30 s | `idle` | nothing is happening in that project |
-| no chat state, unknown runtime version, or worker down | *no report* | the host falls back to its own pane detection |
+| `Some questions for you`, `Close ✕`, `Do you want to proceed`, `(y/n)` | waiting | raised |
+| `working...  <time>  ■ Esc` | running | lowered |
+| the input prompt and its footer, nothing else | idle | lowered |
+| capture failed (no pane, CLI missing, timeout) | unknown | left alone, so it expires |
 
-It never claims `waiting` or `error`: the CLI exposes no status subcommand and
-no extension hook, so those states cannot be observed honestly. **Replies are
-deliberately off** (`replies` omitted, i.e. false): explicit replies need an
-in-process provider extension Freebuff does not have, and with `replies = false`
-the host drops any prompt and offers no provider-native response. The
-`provider_versions` range gates the whole path: a runtime version outside it
-makes the host reject our reports and fall back to pane detection instead of
-trusting unverified state. The manifest integration block carries only the four
-keys the host's `deny_unknown_fields` schema accepts (`tool`,
-`provider_versions`, `command`, `replies`) — `resume_arg` is not one of them.
+A blocking dialog is checked first, because Freebuff draws it over a turn that
+is still open. The flag is the file the host reads for any session,
+plugin-declared or not: `/tmp/aoe-hooks-<euid>/<session id>/attention.json` with
+`{"urgent": true, "urgent_expires_at": <epoch secs>}`, `0600` in a `0700`
+directory, refreshed each tick while the dialog is up and decaying two minutes
+after the last write. That is what the TUI's jump-to-next-attention and the web
+sidebar's Attention sort read: urgent rows float above non-urgent peers within
+their status tier.
 
-Because status reads Freebuff's state directory, writes the report into `/tmp`,
-and lists sessions through the host, the manifest declares `session.integration`,
-`session.read`, `fs.read`, and `fs.write` alongside `runtime.worker`; each is
-prompted at install and pinned to the manifest hash.
+Nothing decorative is written: no row column, no tooltip, no reason string. The
+host's own status field is out of reach pre-19 — released hosts read a plugin's
+`status` hook file only for agents whose detection manifest declares a hook
+rule, which a plugin-declared agent has none of (verified against aoe 1.21.0:
+the file is ignored and the row stays `Idle`). The flag is the attention signal
+that does work today.
+
+### Forward compatibility (api_version 19)
+
+Agent of Empires' first-class route sets the row's own status: an
+`api_version = 19` manifest with an `[[agent_integrations]]` entry, the
+`session.integration` capability, and `AgentIntegrationSnapshot` reports in the
+session's hook directory (`integration-dev.example.aoe-freebuf.json`), which the
+host reads to override the row's status and to expose Freebuff in `aoe agents`,
+the agent picker, and `session.default_tool`.
+
+Released hosts do not parse it yet — aoe 1.21.0 has no `agent_integrations`
+schema and no `session.integration` capability, and a strict-parsed manifest
+carrying either is rejected outright, so declaring 19 today installs nothing at
+all. So the shipped manifest stays at `api_version = 18`, and the plugin is
+built to need no code change when a host ships 19:
+
+- the workspace already writes the report (`src/integration.ts`) from the same
+  pane classification as the attention flag, every tick. A host without the
+  contract ignores the file; a host with it uses it as the row's status.
+- `aoe-plugin.v19.toml` is the same manifest with only the three deltas that
+  schema adds (api_version, `session.integration`, `[[agent_integrations]]`).
+  `test/manifest-v19.test.ts` fails if the two files drift anywhere else, so
+  swapping the file in at release ships exactly the tested plugin.
+
+Replies stay off either way: explicit replies need an in-process provider
+extension Freebuff's CLI does not have, so `reply_keys` stays empty and `prompt`
+stays null in the report.
+
+## Status command
+
+`Freebuf: status` answers with the installed runtime version and how many of
+Freebuff's projects are active right now:
+
+```json
+{"ok": true, "runtime": "node", "message": "Freebuf worker is running · freebuff 0.2.35 · 1 of 2 projects active",
+ "provider_version": "0.2.35", "projects": 2, "running": 1}
+```
 
 ## Install into Agent of Empires
 
@@ -68,17 +89,20 @@ plugin from the TUI, the web dashboard, or `aoe plugin {enable,disable,update}`.
 ## Layout
 
 ```
-aoe-plugin.toml        the manifest (agent integration, commands, settings, ui slots, runtime)
+aoe-plugin.toml        the manifest (commands, settings, ui slots, runtime)
+aoe-plugin.v19.toml    the same manifest for hosts that parse api_version 19
 package.json           build + dev tooling (tsc, eslint, vitest)
 tsconfig.json
 src/
-  index.ts             the JSON-RPC worker loop, RPC multiplexing, status heartbeat
+  index.ts             the JSON-RPC worker loop, RPC multiplexing, attention heartbeat
   rpc.ts               response builders
-  freebuff.ts          reads Freebuff's local state for running/idle
-  integration.ts       builds and writes the host's status report
+  freebuff.ts          reads Freebuff's local state for the status command
+  pane.ts              captures a session pane and classifies its screen
+  attention.ts         writes the host's per-session urgent flag
+  integration.ts       writes the api_version-19 status report (forward compatible)
 scripts/
   write-aoe-wrapper.mjs generates the plugin-relative launcher
-test/                  worker, heartbeat, report, state-probe, and manifest tests
+test/                  worker, heartbeat, pane, attention-flag, state-probe, manifest tests
 ```
 
 ## Develop
@@ -93,9 +117,10 @@ npm test        # vitest
 Drive the worker by hand (it reads one JSON-RPC request per line on stdin):
 
 ```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"aoe-freebuf.status","params":{}}' \
+echo '{"jsonrpc":"2.0","id":1,"method":"plugin.dev.example.aoe-freebuf.status","params":{}}' \
   | node dist/index.js
 ```
+
 ## Worker protocol
 
 The host spawns the worker and exchanges newline-delimited JSON-RPC 2.0 messages
@@ -114,7 +139,7 @@ A response:
 
 Unknown methods return a JSON-RPC error with code `-32601`. See the
 [plugin authoring guide](https://agent-of-empires.com/docs/development/writing-plugins/)
-and the [plugin API reference](https://agent-of-empires.com/docs/api/plugin-api/).
+and the [plugin API reference](https://agent-of-empires.com/docs/plugin-api/).
 
 ## Release
 

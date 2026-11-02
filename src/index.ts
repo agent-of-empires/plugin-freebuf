@@ -7,24 +7,36 @@
 // request (answer it), one without is a response to a request we sent (settle
 // it, never answer), and one without an id is a notification (ignore).
 //
-// Every heartbeat tick the worker reads Freebuff's local chat state and
-// rewrites a status-only AgentIntegrationSnapshot per freebuff session into
-// the host's hook directory, which is what makes the session rows show real
-// running/idle status. When the host is unreachable, Freebuff has no state for
-// a session, or this worker exits, the report simply goes missing or stale and
-// the host falls back to its own pane detection.
+// Every tick the worker reads each freebuff session's own screen, classifies it
+// the way the host classifies its built-in agents (blocking dialog -> waiting,
+// working status line -> running, otherwise parked), and raises or lowers the
+// host's attention flag from that. The flag is what the attention order and
+// jump-to-next-attention read, so a session blocked on a question surfaces
+// exactly like a native agent's Waiting row -- without a text column, and on a
+// host that does not parse the api_version-19 integration contract yet.
 
 import * as readline from "node:readline";
 import { fileURLToPath } from "node:url";
-import { configDir, latestChat, providerVersion, statusForActivity } from "./freebuff.js";
-import { buildSnapshot, instanceHookDir, writeReport } from "./integration.js";
+import { clearUrgent, hookBase, instanceHookDir, writeUrgent } from "./attention.js";
+import { allProjectActivities, configDir, latestChat, providerVersion } from "./freebuff.js";
+import { buildSnapshot, writeReport } from "./integration.js";
+import { capturePane, classifyPane } from "./pane.js";
 import { MethodNotFoundError, RpcResponse, errorResponse, resultResponse } from "./rpc.js";
 
 const RUNTIME = "node";
 
-/** Sessions are listed and reported for this tool only. */
+/** Sessions are listed and flagged for this tool only. */
 const TOOL = "freebuff";
-const HEARTBEAT_MS = 5_000;
+
+/** One capture per session per tick; a slower tick keeps the pane load sane. */
+const HEARTBEAT_MS = 10_000;
+
+/** How long a raised flag survives without a fresh tick, so a dead worker decays. */
+export const FLAG_TTL_MS = 2 * 60_000;
+
+/** Captures in flight at once, so a long session list cannot stall the tick. */
+const CAPTURE_CONCURRENCY = 4;
+
 const REQUEST_TIMEOUT_MS = 5_000;
 // Outbound ids live in their own range so a host request id can never collide
 // with an id this worker is waiting on.
@@ -36,7 +48,21 @@ export function handle(method: string, _params: Record<string, unknown>): Record
   // `_params` for the request arguments.
   const command = method.split(".").pop();
   if (command === "status") {
-    return { ok: true, runtime: RUNTIME, message: "Freebuf worker is running" };
+    const root = configDir();
+    const version = providerVersion(root);
+    const activities = allProjectActivities(root);
+    const running = activities.filter((activity) => activity.status === "running").length;
+    return {
+      ok: true,
+      runtime: RUNTIME,
+      message:
+        version === null
+          ? "Freebuf worker is running; no Freebuff runtime state found"
+          : `Freebuf worker is running · freebuff ${version} · ${running} of ${activities.length} projects active`,
+      provider_version: version,
+      projects: activities.length,
+      running,
+    };
   }
   throw new MethodNotFoundError(method);
 }
@@ -140,62 +166,106 @@ export function processLine(line: string): RpcResponse | null {
   }
 }
 
-// --- status heartbeat ------------------------------------------------------
+// --- attention heartbeat ---------------------------------------------------
 
 export interface HeartbeatOptions {
   configRoot?: string;
-  base?: string;
+  hookBase?: string;
   now?: number;
+  /** Pane reader, injectable for tests. Null means the pane is unknown. */
+  capture?: (sessionId: string) => Promise<string | null>;
 }
 
 /**
- * List the host's sessions, and for every freebuff session with local state
- * write a fresh status report. Sessions without local state (never chatted
- * here) and ticks where the host does not answer are skipped on purpose: no
- * report is what makes the host keep its own detection.
+ * Classify each freebuff session's screen and set the host's attention flag
+ * from it. A session whose pane cannot be read keeps whatever claim it had and
+ * lets the expiry retire it, rather than guessing.
  */
 export async function heartbeat(options: HeartbeatOptions = {}): Promise<void> {
+  const base = options.hookBase ?? hookBase();
+  const capture = options.capture ?? capturePane;
   const root = options.configRoot ?? configDir();
   const now = options.now ?? Date.now();
   const version = providerVersion(root);
-  if (version === null) {
-    return;
-  }
   let payload: unknown;
   try {
     payload = await sendRequest("sessions.list", { exclude: ["archived", "snoozed", "trashed"] });
-  } catch {
+  } catch (err) {
+    note(`sessions.list failed: ${err instanceof Error ? err.message : String(err)}`);
     return;
   }
   const sessions = (payload as { sessions?: unknown } | null)?.sessions;
   if (!Array.isArray(sessions)) {
+    note(`sessions.list returned no session array: ${JSON.stringify(payload)?.slice(0, 200)}`);
     return;
   }
+  const targets: Array<{ id: string; projectPath: string }> = [];
   for (const session of sessions) {
     if (session === null || typeof session !== "object") continue;
     const row = session as Record<string, unknown>;
-    if (row.tool !== TOOL || typeof row.id !== "string" || typeof row.project_path !== "string") continue;
-    const chat = latestChat(root, row.project_path);
-    if (chat === null) continue;
-    try {
-      writeReport(
-        instanceHookDir(row.id, options.base),
-        buildSnapshot({
-          instanceId: row.id,
-          providerVersion: version,
-          providerSessionId: chat.chatId,
-          status: statusForActivity(now - chat.lastActivityMs),
-          writerPid: process.pid,
-        }),
-      );
-    } catch {
-      // One unwritable report must not stall the other sessions' heartbeats.
-    }
+    if (row.tool !== TOOL || typeof row.id !== "string") continue;
+    targets.push({ id: row.id, projectPath: typeof row.project_path === "string" ? row.project_path : "" });
+  }
+  if (!listed) {
+    listed = true;
+    const tools = sessions
+      .slice(0, 5)
+      .map((row) => String((row as Record<string, unknown>)?.tool))
+      .join(",");
+    note(`${targets.length} freebuff of ${sessions.length} listed (tools: ${tools})`);
+  }
+  for (let index = 0; index < targets.length; index += CAPTURE_CONCURRENCY) {
+    const batch = targets.slice(index, index + CAPTURE_CONCURRENCY);
+    await Promise.all(
+      batch.map(async ({ id, projectPath }) => {
+        const pane = await capture(id);
+        if (pane === null) {
+          note(`pane capture failed for ${id}`); // unknown: leave the claim to decay
+          return;
+        }
+        const dir = instanceHookDir(id, base);
+        const state = classifyPane(pane);
+        if (seen.get(id) !== state) {
+          seen.set(id, state);
+          note(`${id}: ${state}`);
+        }
+        try {
+          if (state === "waiting") writeUrgent(dir, now + FLAG_TTL_MS);
+          else clearUrgent(dir);
+          // Forward compatible: a host that understands api_version 19 reads
+          // this for the row's own status; one that does not ignores the file.
+          writeReport(
+            dir,
+            buildSnapshot({
+              instanceId: id,
+              providerVersion: version ?? "",
+              providerSessionId: projectPath === "" ? "" : (latestChat(root, projectPath)?.chatId ?? ""),
+              status: state,
+              writerPid: process.pid,
+            }),
+          );
+        } catch (err) {
+          // Not writable, or the path was squatted: skip this session this tick.
+          note(`flag write failed for ${id}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }),
+    );
   }
 }
 
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let ticking = false;
+let announced = false;
+let listed = false;
+const seen = new Map<string, string>();
+
+/**
+ * One line on the worker's stderr, which the host keeps in its worker log.
+ * Failures are worth a line; successful ticks are not.
+ */
+function note(message: string): void {
+  process.stderr.write(`freebuf: ${message}\n`);
+}
 
 export function startHeartbeat(): void {
   if (heartbeatTimer !== null) return;
@@ -204,9 +274,16 @@ export function startHeartbeat(): void {
   heartbeatTimer = setInterval(() => {
     if (ticking) return;
     ticking = true;
-    void heartbeat().finally(() => {
-      ticking = false;
-    });
+    void heartbeat()
+      .then(() => {
+        if (!announced) {
+          announced = true;
+          note("pane heartbeat running");
+        }
+      })
+      .finally(() => {
+        ticking = false;
+      });
   }, HEARTBEAT_MS);
 }
 

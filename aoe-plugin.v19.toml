@@ -1,0 +1,69 @@
+# Freebuf for hosts that parse agent integrations (api_version 19).
+#
+# This is the same plugin as aoe-plugin.toml with the three deltas that schema
+# adds, kept as a separate file so a release can swap it in without touching
+# code: the worker already writes the AgentIntegrationSnapshot report every
+# tick (src/integration.ts), so only the manifest has to change.
+#
+# Do not install this file as-is on a host older than the api_version below:
+# the manifest is parsed strictly and a newer api_version is rejected outright,
+# which installs nothing at all.
+#
+# Deliberate difference from aoe-plugin.toml:
+#   1. api_version 18 -> 19
+#   2. capabilities gains "session.integration"
+#   3. the [[agent_integrations]] block below
+# test/manifest-v19.test.ts fails if the two files drift in anything else.
+
+id = "dev.example.aoe-freebuf"
+name = "Freebuf"
+version = "0.1.0"
+api_version = 19
+aoe_version = ">=1.11.0, <2.0.0"
+description = "An Agent of Empires plugin for the FreeBuff coding agent."
+
+capabilities = ["runtime.worker", "session.read", "fs.read", "fs.write", "process.spawn", "session.integration"]
+
+# Declares Freebuff as a provider the host launches and tracks natively: the
+# status report the worker already writes becomes the session row's own status
+# (Running / Waiting / Idle), and freebuff becomes selectable in the agent
+# picker, `aoe agents`, and `session.default_tool`.
+[[agent_integrations]]
+tool = "freebuff"
+command = ["freebuff"]
+resume_arg = "--resume"
+
+[agent_integrations.provider_versions]
+freebuff = ">=0.2.0"
+
+[[commands]]
+id = "status"
+title = "Freebuf: status"
+description = "Show the Freebuf status summary."
+
+[[settings]]
+key = "enabled"
+label = "Enable Freebuf"
+description = "Master toggle for the plugin's behavior."
+type = "boolean"
+default = true
+
+[[ui]]
+slot = "pane"
+id = "aoe_freebuf_pane"
+
+[runtime]
+kind = "command"
+command = [".aoe-build/node/bin/aoe-freebuf-worker"]
+
+[[runtime.build]]
+command = ["npm", "install"]
+platforms = ["linux", "macos"]
+
+[[runtime.build]]
+command = ["npm", "run", "build"]
+platforms = ["linux", "macos"]
+
+[[runtime.build]]
+command = ["node", "scripts/write-aoe-wrapper.mjs"]
+platforms = ["linux", "macos"]

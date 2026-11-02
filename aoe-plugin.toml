@@ -3,14 +3,19 @@
 # Manifest schema: aoe-plugin-api/src/manifest.rs in agent-of-empires. The host
 # parses this strictly (deny_unknown_fields), so every key must match a field in
 # that schema. Field-by-field reference:
-# https://agent-of-empires.com/docs/api/plugin-api/
+# https://agent-of-empires.com/docs/plugin-api/
 
 id = "dev.example.aoe-freebuf"
 name = "Freebuf"
 version = "0.1.0"
 # Manifest schema / host API version. The host rejects a manifest whose
-# api_version it does not support.
-api_version = 19
+# api_version it does not support. 18 is the newest version this plugin's
+# contributions need; 19 adds only the provider-native agent-integration
+# contract (`[[agent_integrations]]` plus the `session.integration` capability),
+# which released hosts do not parse yet -- declaring it gets the manifest
+# rejected, not a degraded install. Raise this to 19 with that block once the
+# host ships it (see src/integration.ts, which is that path's report writer).
+api_version = 18
 # Host-app compatibility range (a different axis from api_version). The host
 # refuses install/update outside this range. Requires api_version >= 4.
 aoe_version = ">=1.11.0, <2.0.0"
@@ -18,30 +23,13 @@ description = "An Agent of Empires plugin for the FreeBuff coding agent."
 
 # Capability grants are prompted at install and pinned to the manifest hash.
 # Declare only what the worker actually uses. `runtime.worker` runs the worker;
-# `session.integration` enables provider-native status (api_version >= 19); the
-# worker reads Freebuff's local state to decide status (`fs.read`), enumerates
-# freebuff sessions to heartbeat (`session.read`), and writes the status report
-# into the host's per-instance hook directory (`fs.write`). See the capability
-# table in the plugin API reference.
-capabilities = ["runtime.worker", "session.integration", "session.read", "fs.read", "fs.write"]
-
-# Agent launch + native status. The host contributes `freebuff` to the agent
-# picker, `aoe agents`, and `session.default_tool`, and the worker heartbeats a
-# status-only AgentIntegrationSnapshot for each freebuff session (running/idle
-# from Freebuff's local chat activity). Exactly one block; this schema is
-# deny_unknown_fields and accepts only `tool`, `provider_versions`, `command`,
-# `replies` -- `resume_arg` (as plugin-omp declares it) is not part of it and
-# would fail manifest parsing.
-# `provider_versions` is required (nonempty) whenever `session.integration` is
-# declared, and every report's `provider_version` must match one of these
-# ranges or the host rejects it and falls back to pane detection.
-# `replies` stays false: replies gate the provider-native prompt contract
-# (AgentIntegrationReply), which needs an in-process extension hook Freebuff's
-# CLI does not expose, so the host drops any prompt and offers no native reply.
-[[agent_integrations]]
-tool = "freebuff"
-provider_versions = [">=0.2.0, <1.0.0"]
-command = "freebuff"
+# the worker lists sessions through the host to find freebuff ones
+# (`session.read`), reads each session's pane with `aoe session capture` to
+# classify its screen like a built-in agent's detector (`process.spawn`), reads
+# Freebuff's own state directory for the status command (`fs.read`), and raises
+# the host's attention flag by writing into its per-session hook directory under
+# /tmp (`fs.write`).
+capabilities = ["runtime.worker", "session.read", "fs.read", "fs.write", "process.spawn"]
 
 # Commands the plugin contributes (palette / CLI), namespaced by the host as
 # plugin.dev.example.aoe-freebuf.<id>. The command-id -> worker RPC mapping
@@ -60,6 +48,13 @@ label = "Enable Freebuf"
 description = "Master toggle for the plugin's behavior."
 type = "boolean"
 default = true
+
+# Attention is deliberately not a slot. The worker classifies each session's
+# own pane (blocking dialog / working / parked, the rules a built-in agent's
+# detector uses) and raises the host's attention flag by writing
+# `/tmp/aoe-hooks-<euid>/<session id>/attention.json` (see src/attention.ts),
+# which is what the attention sort and the TUI's jump-to-next-attention read for
+# every session. A `row-column` cell would only add text those orderings ignore.
 
 # A UI extension point. The host renders the slot; the worker pushes display
 # state through the ui.state.set host RPC. `pane` is a dockable tool-window in a

@@ -1,22 +1,27 @@
 // The status-only AgentIntegrationSnapshot half of the host's agent-integration
-// contract (aoe-plugin-api/src/agent_integration.rs, PR #4783): a JSON report
-// the host reads from the session's private hook directory, `/tmp/aoe-hooks-<euid>/`,
+// contract (aoe-plugin-api/src/agent_integration.rs): a JSON report the host
+// reads from the session's private hook directory, `/tmp/aoe-hooks-<euid>/`,
 // and uses to override the session row's status. Directory mode must be 0700
-// and the report exactly 0600, owned by the effective uid, at most 64 KiB and
-// no more than 15 seconds old, written by a live pid -- so we rewrite it every
+// and the report 0600, owned by the effective uid, at most 64 KiB and no more
+// than 15 seconds old, written by a live pid -- so it is rewritten every
 // heartbeat tick regardless of whether the status changed.
+//
+// This is the forward-compatible half: the same pane classification that drives
+// the attention flag (src/pane.ts) is written here too. A host that does not
+// know the contract ignores the file (it only looks at integrations a manifest
+// declares), so writing it costs one small JSON file per session and means
+// `aoe-plugin.v19.toml` needs no code change when it is swapped in.
 
 import { chmodSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import path from "node:path";
+import type { PaneState } from "./pane.js";
 
 /** Must match `id` in aoe-plugin.toml: the report file is named after it. */
 export const PLUGIN_ID = "dev.example.aoe-freebuf";
 
 /** Report file schema version; the host requires exactly 1. */
 export const SCHEMA_VERSION = 1;
-
-export type AgentStatus = "running" | "waiting" | "idle" | "error";
 
 export interface AgentIntegrationSnapshot {
   schema_version: number;
@@ -25,7 +30,7 @@ export interface AgentIntegrationSnapshot {
   provider_session_id: string;
   writer_pid: number;
   revision: number;
-  status: AgentStatus;
+  status: PaneState;
   reply_keys: string[];
   prompt: null;
 }
@@ -34,7 +39,7 @@ export function buildSnapshot(input: {
   instanceId: string;
   providerVersion: string;
   providerSessionId: string;
-  status: AgentStatus;
+  status: PaneState;
   writerPid: number;
 }): AgentIntegrationSnapshot {
   return {
@@ -43,8 +48,8 @@ export function buildSnapshot(input: {
     provider_version: input.providerVersion,
     provider_session_id: input.providerSessionId,
     writer_pid: input.writerPid,
-    // `revision` and `reply_keys` only matter for prompts; status-only reports
-    // never change a prompt, so the revision stays 0 and no wake keys are sent.
+    // `revision` and `reply_keys` only matter for prompts, and replies are off:
+    // status-only reports never change a prompt, so the revision stays 0.
     revision: 0,
     status: input.status,
     reply_keys: [],
@@ -70,9 +75,9 @@ function ensureDir(dir: string): void {
 }
 
 /**
- * Write the report for one session atomically (temp file + rename, so the
- * host never reads a half-written JSON). Throws on failure; the caller skips
- * that tick and the host keeps pane detection.
+ * Write the report for one session atomically (temp file + rename, so the host
+ * never reads a half-written JSON). Throws on failure; the caller skips that
+ * session for the tick.
  */
 export function writeReport(dir: string, snapshot: AgentIntegrationSnapshot): void {
   ensureDir(dir);
