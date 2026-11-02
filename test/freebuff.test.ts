@@ -2,7 +2,15 @@ import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:
 import * as os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ACTIVITY_WINDOW_MS, configDir, latestChat, providerVersion, statusForActivity } from "../src/freebuff";
+import {
+  ACTIVITY_WINDOW_MS,
+  LOG_TAIL_BYTES,
+  allProjectActivities,
+  configDir,
+  latestChat,
+  providerVersion,
+  statusForActivity,
+} from "../src/freebuff";
 
 const cleanups: string[] = [];
 
@@ -24,6 +32,26 @@ function makeChat(configRoot: string, project: string, chat: string, file: strin
   writeFileSync(filePath, "{}");
   const when = new Date(Date.now() - ageMs);
   utimesSync(filePath, when, when);
+}
+
+/** One log record in the runtime's own shape: the body is ignored, `msg` is not. */
+function logLine(msg: string): string {
+  return JSON.stringify({ level: "DEBUG", timestamp: new Date().toISOString(), data: { iteration: 1 }, msg }) + "\n";
+}
+
+/** Write `log.jsonl` for a chat with an mtime `ageMs` ago. */
+function makeLog(configRoot: string, project: string, chat: string, body: string, ageMs: number): void {
+  const target = path.join(configRoot, "projects", project, "chats", chat);
+  mkdirSync(target, { recursive: true });
+  const filePath = path.join(target, "log.jsonl");
+  writeFileSync(filePath, body);
+  const when = new Date(Date.now() - ageMs);
+  utimesSync(filePath, when, when);
+}
+
+/** The status the status command would report for one project. */
+function statusOf(configRoot: string, project: string): string | undefined {
+  return allProjectActivities(configRoot).find((activity) => activity.project === project)?.status;
 }
 
 describe("freebuff state probe", () => {
@@ -50,6 +78,81 @@ describe("freebuff state probe", () => {
     // A project that exists but has no chat directories counts the same.
     mkdirSync(path.join(root, "projects", "empty", "chats"), { recursive: true });
     expect(latestChat(root, "/some/path/empty")).toBeNull();
+  });
+
+  it("keeps a step with no End running past the activity window", () => {
+    const root = tempDir("freebuff-cfg-");
+    makeLog(
+      root,
+      "demo",
+      "2026-11-02T14-00-00.000Z",
+      logLine("Start agent base3-free-catalog step 27 (6clt44vt1x4)"),
+      ACTIVITY_WINDOW_MS * 3,
+    );
+
+    // The mtime says idle; the unmatched Start says the step is still in flight.
+    expect(statusOf(root, "demo")).toBe("running");
+  });
+
+  it("reports idle after a matched End and Main prompt finished, even when freshly written", () => {
+    const root = tempDir("freebuff-cfg-");
+    makeLog(
+      root,
+      "demo",
+      "2026-11-02T14-00-00.000Z",
+      logLine("Start agent base3-free-catalog step 29 (6clt44vt1x4)") +
+        logLine("End agent base3-free-catalog step 29 (6clt44vt1x4)") +
+        logLine("Main prompt finished"),
+      10_000,
+    );
+
+    // Fresh mtime alone would read as running; a closed turn does not.
+    expect(statusOf(root, "demo")).toBe("idle");
+  });
+
+  it("falls back to the mtime window when the log is missing or has no step lines", () => {
+    const root = tempDir("freebuff-cfg-");
+    makeChat(root, "fresh-nolog", "2026-11-02T14-00-00.000Z", "state.json", 1_000);
+    makeChat(root, "stale-nolog", "2026-11-02T14-00-00.000Z", "state.json", ACTIVITY_WINDOW_MS * 2);
+    makeLog(root, "fresh-nosteps", "2026-11-02T14-00-00.000Z", "{}\n", 1_000);
+    makeLog(root, "stale-nosteps", "2026-11-02T14-00-00.000Z", "not json\n", ACTIVITY_WINDOW_MS * 2);
+
+    expect(statusOf(root, "fresh-nolog")).toBe("running");
+    expect(statusOf(root, "stale-nolog")).toBe("idle");
+    expect(statusOf(root, "fresh-nosteps")).toBe("running");
+    expect(statusOf(root, "stale-nosteps")).toBe("idle");
+  });
+
+  it("ignores a truncated tail fragment and a non-JSON record but parses the rest", () => {
+    const root = tempDir("freebuff-cfg-");
+    // The padding line is longer than the tail window, so the read starts in
+    // the middle of it; a garbage record follows before the real step line.
+    const padding = JSON.stringify({ level: "DEBUG", msg: "x".repeat(LOG_TAIL_BYTES + 50) }) + "\n";
+    makeLog(
+      root,
+      "demo",
+      "2026-11-02T14-00-00.000Z",
+      padding + "this line is not json\n" + logLine("Start agent base3-free-catalog step 3 (abc)"),
+      ACTIVITY_WINDOW_MS * 2,
+    );
+
+    expect(statusOf(root, "demo")).toBe("running");
+  });
+
+  it("goes running again when a later Start follows a matched End pair", () => {
+    const root = tempDir("freebuff-cfg-");
+    makeLog(
+      root,
+      "demo",
+      "2026-11-02T14-00-00.000Z",
+      logLine("Start agent base3-free-catalog step 1 (abc)") +
+        logLine("End agent base3-free-catalog step 1 (abc)") +
+        logLine("Main prompt finished") +
+        logLine("Start agent base3-free-catalog step 2 (abc)"),
+      ACTIVITY_WINDOW_MS * 4,
+    );
+
+    expect(statusOf(root, "demo")).toBe("running");
   });
 
   it("maps activity age onto running/idle", () => {
