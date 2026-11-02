@@ -49,9 +49,14 @@ function makeLog(configRoot: string, project: string, chat: string, body: string
   utimesSync(filePath, when, when);
 }
 
+/** The activity the status command would report for one project. */
+function activityOf(configRoot: string, project: string) {
+  return allProjectActivities(configRoot).find((activity) => activity.project === project);
+}
+
 /** The status the status command would report for one project. */
 function statusOf(configRoot: string, project: string): string | undefined {
-  return allProjectActivities(configRoot).find((activity) => activity.project === project)?.status;
+  return activityOf(configRoot, project)?.status;
 }
 
 describe("freebuff state probe", () => {
@@ -153,6 +158,46 @@ describe("freebuff state probe", () => {
     );
 
     expect(statusOf(root, "demo")).toBe("running");
+  });
+
+  it("prefers a quieter chat whose step is in flight over a fresher closed one", () => {
+    const root = tempDir("freebuff-cfg-");
+    // The fresher chat finished its turn 5s ago, so its own status is idle; the
+    // older chat still has an unmatched Start, which outranks a fresher mtime.
+    makeLog(
+      root,
+      "demo",
+      "2026-11-02T15-00-00.000Z",
+      logLine("Start agent base3-free-catalog step 4 (abc)") +
+        logLine("End agent base3-free-catalog step 4 (abc)") +
+        logLine("Main prompt finished"),
+      5_000,
+    );
+    makeLog(
+      root,
+      "demo",
+      "2026-11-02T14-00-00.000Z",
+      logLine("Start agent base3-free-catalog step 27 (abc)"),
+      ACTIVITY_WINDOW_MS * 4,
+    );
+
+    const activity = activityOf(root, "demo");
+    expect(activity?.status).toBe("running");
+    expect(activity?.chatId).toBe("2026-11-02T14-00-00.000Z");
+  });
+
+  it("reports the fresher chat when every chat's turn has closed", () => {
+    const root = tempDir("freebuff-cfg-");
+    const closed =
+      logLine("Start agent base3-free-catalog step 5 (abc)") +
+      logLine("End agent base3-free-catalog step 5 (abc)") +
+      logLine("Main prompt finished");
+    makeLog(root, "demo", "2026-11-02T15-00-00.000Z", closed, 5_000);
+    makeLog(root, "demo", "2026-11-02T14-00-00.000Z", closed, ACTIVITY_WINDOW_MS * 4);
+
+    const activity = activityOf(root, "demo");
+    expect(activity?.status).toBe("idle");
+    expect(activity?.chatId).toBe("2026-11-02T15-00-00.000Z");
   });
 
   it("maps activity age onto running/idle", () => {
