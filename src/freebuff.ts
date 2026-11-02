@@ -4,16 +4,31 @@
 // The npm `freebuff` package is only a launcher; the real runtime downloads
 // itself into `~/.config/manicode` (the path its launcher.js hardcodes) and
 // keeps, per project, `projects/<project dir>/chats/<chat id>/` state files
-// that are rewritten while a chat is active. That is the only honest local
-// signal of "is this freebuff session working right now": the CLI exposes no
-// status subcommand and no extension hook.
+// that are rewritten while a chat is active.
+//
+// Two signals live there, and they answer different questions:
+//   - the newest state-file mtime says *when* something last happened;
+//   - `log.jsonl` says *what* happened last. The runtime logs one
+//     `Start agent <template> step N` line per step and a matching
+//     `End agent <template> step N`, then `Main prompt finished` at the end of a
+//     turn. Freebuff writes those per step, not continuously, so a step that
+//     runs for minutes leaves a stale mtime while the agent is plainly working.
+//     A Start with no later End or turn-finished line is a step in flight --
+//     definitive, and independent of any wall-clock window.
+//
+// So the log decides when it can, and the mtime window is the fallback for a
+// log that is missing, unreadable, or has no step lines yet. Only the tail of
+// the log is read: it grows to hundreds of KB.
 
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
 import * as os from "node:os";
 import path from "node:path";
 
 /** How stale chat activity may be before a session counts as no longer running. */
 export const ACTIVITY_WINDOW_MS = 30_000;
+
+/** Bytes of `log.jsonl` read from the end; enough for many steps, not the file. */
+export const LOG_TAIL_BYTES = 64 * 1024;
 
 /** The runtime's config directory; overridable for tests and unusual installs. */
 export function configDir(env: NodeJS.ProcessEnv = process.env): string {
@@ -27,12 +42,93 @@ export interface ChatActivity {
   lastActivityMs: number;
 }
 
+/** What the chat's own log proves about the turn. */
+export type StepState = "running" | "idle";
+
+const STEP_START = /^Start agent .+ step \d+/;
+const STEP_END = /^End agent .+ step \d+/;
+const TURN_FINISHED = "Main prompt finished";
+
 /**
- * The freshest chat activity for one project directory name, or null when
- * Freebuff has never recorded a chat there. Reads only directory listings and
- * stat mtimes, never file bodies.
+ * Read at most `maxBytes` from the end of a file, reporting whether the window
+ * covers the whole file. Returns null when the file cannot be opened or read.
  */
-function newestChat(configRoot: string, project: string): ChatActivity | null {
+function readLogTail(file: string, maxBytes: number): { text: string; whole: boolean } | null {
+  let fd: number;
+  try {
+    fd = openSync(file, "r");
+  } catch {
+    return null;
+  }
+  try {
+    const size = fstatSync(fd).size;
+    const start = Math.max(0, size - maxBytes);
+    const length = size - start;
+    const buffer = Buffer.alloc(length);
+    let read = 0;
+    while (read < length) {
+      const chunk = readSync(fd, buffer, read, length - read, start + read);
+      if (chunk <= 0) break; // rotated or truncated under us
+      read += chunk;
+    }
+    return { text: buffer.subarray(0, read).toString("utf8"), whole: start === 0 };
+  } catch {
+    return null;
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+      // Nothing left to release.
+    }
+  }
+}
+
+/**
+ * The in-flight verdict from one chat's `log.jsonl` tail, or null when the log
+ * is missing, unreadable, or its tail holds no step or turn lines (so the
+ * caller should fall back to mtimes).
+ *
+ * The last relevant line wins: a Start is in flight, an End or
+ * `Main prompt finished` is not -- including when a fresh End merely happened
+ * seconds ago. A later Start after a matched pair opens a new step.
+ */
+export function stepStateFromLog(chatDir: string): StepState | null {
+  const tail = readLogTail(path.join(chatDir, "log.jsonl"), LOG_TAIL_BYTES);
+  if (tail === null) return null;
+  const lines = tail.text.split("\n");
+  // A line only counts once a newline follows it: the first segment is a
+  // fragment when the window began mid-file, and the last is a write still in
+  // progress when the file does not end in a newline. Both are dropped.
+  if (!tail.whole) lines.shift();
+  if (lines.length > 0 && lines[lines.length - 1] !== "") lines.pop();
+
+  let state: StepState | null = null;
+  for (const line of lines) {
+    if (line === "") continue;
+    let record: unknown;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      continue; // a torn or non-JSON record proves nothing either way
+    }
+    if (record === null || typeof record !== "object") continue;
+    const msg = (record as { msg?: unknown }).msg;
+    if (typeof msg !== "string") continue;
+    if (STEP_START.test(msg)) state = "running";
+    else if (STEP_END.test(msg) || msg === TURN_FINISHED) state = "idle";
+  }
+  return state;
+}
+
+interface ChatEntry extends ChatActivity {
+  chatDir: string;
+}
+
+/**
+ * Every chat directory for one project, freshest first. Reads only directory
+ * listings and stat mtimes, never file bodies.
+ */
+function chatsFor(configRoot: string, project: string): ChatEntry[] {
   const chatsDir = path.join(configRoot, "projects", project, "chats");
   let chatIds: string[];
   try {
@@ -40,10 +136,10 @@ function newestChat(configRoot: string, project: string): ChatActivity | null {
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name);
   } catch {
-    return null;
+    return [];
   }
 
-  let best: ChatActivity | null = null;
+  const chats: ChatEntry[] = [];
   for (const chatId of chatIds) {
     const chatDir = path.join(chatsDir, chatId);
     let newest = 0;
@@ -60,11 +156,10 @@ function newestChat(configRoot: string, project: string): ChatActivity | null {
     } catch {
       continue;
     }
-    if (newest > 0 && (best === null || newest > best.lastActivityMs)) {
-      best = { chatId, lastActivityMs: newest };
-    }
+    if (newest > 0) chats.push({ chatId, chatDir, lastActivityMs: newest });
   }
-  return best;
+  chats.sort((a, b) => b.lastActivityMs - a.lastActivityMs);
+  return chats;
 }
 
 /**
@@ -73,7 +168,9 @@ function newestChat(configRoot: string, project: string): ChatActivity | null {
  * claim).
  */
 export function latestChat(configRoot: string, projectPath: string): ChatActivity | null {
-  return newestChat(configRoot, path.basename(projectPath));
+  const [chat] = chatsFor(configRoot, path.basename(projectPath));
+  if (chat === undefined) return null;
+  return { chatId: chat.chatId, lastActivityMs: chat.lastActivityMs };
 }
 
 /** Map activity age to the status we are willing to claim. */
@@ -90,13 +187,30 @@ export interface ProjectActivity {
 }
 
 function activityFor(configRoot: string, project: string, now: number): ProjectActivity | null {
-  const chat = newestChat(configRoot, project);
-  if (chat === null) return null;
+  const chats = chatsFor(configRoot, project);
+  const [newest] = chats;
+  if (newest === undefined) return null;
+
+  // Usually the freshest chat is the live one. But a quieter chat can be the
+  // one with a step in flight, and its Start/End pair outranks the fresher
+  // chat's mtime, so scan for it before settling on the newest.
+  let chosen = newest;
+  let state = stepStateFromLog(newest.chatDir);
+  if (state !== "running") {
+    for (const chat of chats.slice(1)) {
+      const candidate = stepStateFromLog(chat.chatDir);
+      if (candidate === "running") {
+        chosen = chat;
+        state = candidate;
+        break;
+      }
+    }
+  }
   return {
     project,
-    chatId: chat.chatId,
-    lastActivityMs: chat.lastActivityMs,
-    status: statusForActivity(now - chat.lastActivityMs),
+    chatId: chosen.chatId,
+    lastActivityMs: chosen.lastActivityMs,
+    status: state ?? statusForActivity(now - chosen.lastActivityMs),
   };
 }
 
