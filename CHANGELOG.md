@@ -8,7 +8,7 @@ The format follows [Conventional Commits](https://www.conventionalcommits.org/).
 
 ### Added
 
-- Forward compatibility for `api_version = 19`: the worker writes the status-only `AgentIntegrationSnapshot` report (`integration-dev.example.aoe-freebuf.json`, `0700`/`0600`, atomic) from the same pane classification every tick, so a host that ships the contract reads the row's status with no code change; an older host ignores the file. `aoe-plugin.v19.toml` holds the swapped manifest (api_version, `session.integration`, `[[agent_integrations]]` only), and `test/manifest-v19.test.ts` fails if the two manifests drift in anything else.
+- The shipped `aoe-plugin.toml` is now the `api_version = 19` manifest, so installing from the repository root gets the row-status integration: an `[[agent_integrations]]` entry for `freebuff` with `provider_versions` as a semver list (`>=0.2.36, <1.0.0`), a single-string `command`, no `resume_arg`, and the `session.integration` capability. `aoe_version` is pinned to `>=1.21.0, <2.0.0`, the host line that parses this schema. `aoe-plugin.v19.toml` and `test/manifest-v19.test.ts` are gone: the host only ever installs `aoe-plugin.toml`, so the separate variant was never installable from a branch.
 - Pane classification (`src/pane.ts`): `aoe session capture` output is stripped of colour and matched against Freebuff's own chrome — a blocking dialog (`Some questions for you`, `Close ✕`, `Do you want to proceed`, `(y/n)`) is `waiting`, the `working... ■ Esc` status line is `running`, anything else is `idle`. This is the rule shape the host's built-in detectors use, read from the same surface.
 - Attention came from the pane: every 10 s each `freebuff` session's class decides the host's urgent flag (`/tmp/aoe-hooks-<euid>/<session id>/attention.json`, `0700` dir, `0600` file, `{ urgent, urgent_expires_at }`), so a session blocked on a question surfaces in the attention order and jump-to-next-attention. The flag is refreshed while the dialog is up and decays two minutes after the last write; an unreadable pane leaves the previous claim to expire rather than guessing.
 - `process.spawn` capability, for the pane capture.
@@ -17,6 +17,7 @@ The format follows [Conventional Commits](https://www.conventionalcommits.org/).
 ### Changed
 
 - Attention is screen-driven, not mtime-driven: the chat-activity heuristic (`ATTENTION_WINDOW_MS`, `needsAttention`) is gone, so "working" means the pane says working, not that a file moved.
+- The manifest carries the agent-integration contract itself instead of a release-time file swap that no install path performed.
 - No text is written for a row: no `urgent_reason`, no `row-column` cell, no tooltip.
 
 ### Removed

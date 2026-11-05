@@ -35,32 +35,26 @@ rule, which a plugin-declared agent has none of (verified against aoe 1.21.0:
 the file is ignored and the row stays `Idle`). The flag is the attention signal
 that does work today.
 
-### Forward compatibility (api_version 19)
+### Row status (api_version 19)
 
-Agent of Empires' first-class route sets the row's own status: an
-`api_version = 19` manifest with an `[[agent_integrations]]` entry, the
-`session.integration` capability, and `AgentIntegrationSnapshot` reports in the
-session's hook directory (`integration-dev.example.aoe-freebuf.json`), which the
-host reads to override the row's status and to expose Freebuff in `aoe agents`,
-the agent picker, and `session.default_tool`.
+Agent of Empires' first-class route sets the row's own status: the shipped
+manifest declares `api_version = 19` with an `[[agent_integrations]]` entry and
+the `session.integration` capability, and the worker writes
+`AgentIntegrationSnapshot` reports into the session's hook directory
+(`integration-dev.example.aoe-freebuf.json`). The host reads those to override
+the row's status and to expose Freebuff in `aoe agents`, the agent picker, and
+`session.default_tool`.
 
-Released hosts do not parse it yet — aoe 1.21.0 has no `agent_integrations`
-schema and no `session.integration` capability, and a strict-parsed manifest
-carrying either is rejected outright, so declaring 19 today installs nothing at
-all. So the shipped manifest stays at `api_version = 18`, and the plugin is
-built to need no code change when a host ships 19:
+That schema version is also the install floor. The host parses manifests
+strictly and rejects one whose schema version it does not know, so
+`aoe_version` is `>=1.21.0, <2.0.0` -- the host line that parses this contract.
+`src/integration.ts` writes the report from the same pane classification as the
+attention flag, every tick; the attention flag still works on its own, so a
+session stays visible in the attention order either way.
 
-- the workspace already writes the report (`src/integration.ts`) from the same
-  pane classification as the attention flag, every tick. A host without the
-  contract ignores the file; a host with it uses it as the row's status.
-- `aoe-plugin.v19.toml` is the same manifest with only the three deltas that
-  schema adds (api_version, `session.integration`, `[[agent_integrations]]`).
-  `test/manifest-v19.test.ts` fails if the two files drift anywhere else, so
-  swapping the file in at release ships exactly the tested plugin.
-
-Replies stay off either way: explicit replies need an in-process provider
-extension Freebuff's CLI does not have, so `reply_keys` stays empty and `prompt`
-stays null in the report.
+Replies stay off: explicit replies need an in-process provider extension
+Freebuff's CLI does not have, so `reply_keys` stays empty and `prompt` stays
+null in the report.
 
 ## Status command
 
@@ -89,8 +83,7 @@ plugin from the TUI, the web dashboard, or `aoe plugin {enable,disable,update}`.
 ## Layout
 
 ```
-aoe-plugin.toml        the manifest (commands, settings, ui slots, runtime)
-aoe-plugin.v19.toml    the same manifest for hosts that parse api_version 19
+aoe-plugin.toml        the manifest (api_version 19, integration, settings, ui, runtime)
 package.json           build + dev tooling (tsc, eslint, vitest)
 tsconfig.json
 src/
@@ -99,7 +92,7 @@ src/
   freebuff.ts          reads Freebuff's local state for the status command
   pane.ts              captures a session pane and classifies its screen
   attention.ts         writes the host's per-session urgent flag
-  integration.ts       writes the api_version-19 status report (forward compatible)
+  integration.ts       writes the row-status report the host reads
 scripts/
   write-aoe-wrapper.mjs generates the plugin-relative launcher
 test/                  worker, heartbeat, pane, attention-flag, state-probe, manifest tests

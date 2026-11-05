@@ -6,11 +6,9 @@
 // than 15 seconds old, written by a live pid -- so it is rewritten every
 // heartbeat tick regardless of whether the status changed.
 //
-// This is the forward-compatible half: the same pane classification that drives
-// the attention flag (src/pane.ts) is written here too. A host that does not
-// know the contract ignores the file (it only looks at integrations a manifest
-// declares), so writing it costs one small JSON file per session and means
-// `aoe-plugin.v19.toml` needs no code change when it is swapped in.
+// The same pane classification that drives the attention flag (src/pane.ts) is
+// written here too, so the row's status and the attention flag never disagree.
+// The report is one small JSON file per session per tick.
 
 import { chmodSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import * as os from "node:os";

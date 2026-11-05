@@ -8,17 +8,16 @@
 id = "dev.example.aoe-freebuf"
 name = "Freebuf"
 version = "0.1.0"
-# Manifest schema / host API version. The host rejects a manifest whose
-# api_version it does not support. 18 is the newest version this plugin's
-# contributions need; 19 adds only the provider-native agent-integration
-# contract (`[[agent_integrations]]` plus the `session.integration` capability),
-# which released hosts do not parse yet -- declaring it gets the manifest
-# rejected, not a degraded install. Raise this to 19 with that block once the
-# host ships it (see src/integration.ts, which is that path's report writer).
-api_version = 18
+# Manifest schema / host API version. 19 adds the provider-native agent
+# integration contract this plugin uses: `[[agent_integrations]]` plus the
+# `session.integration` capability, which lets the host read the worker's
+# AgentIntegrationSnapshot as the session row's own status. The host parses
+# strictly, so a host that does not know this schema rejects the manifest
+# instead of ignoring the block; `aoe_version` is the floor that parses it.
+api_version = 19
 # Host-app compatibility range (a different axis from api_version). The host
 # refuses install/update outside this range. Requires api_version >= 4.
-aoe_version = ">=1.11.0, <2.0.0"
+aoe_version = ">=1.21.0, <2.0.0"
 description = "An Agent of Empires plugin for the FreeBuff coding agent."
 
 # Capability grants are prompted at install and pinned to the manifest hash.
@@ -26,10 +25,24 @@ description = "An Agent of Empires plugin for the FreeBuff coding agent."
 # the worker lists sessions through the host to find freebuff ones
 # (`session.read`), reads each session's pane with `aoe session capture` to
 # classify its screen like a built-in agent's detector (`process.spawn`), reads
-# Freebuff's own state directory for the status command (`fs.read`), and raises
-# the host's attention flag by writing into its per-session hook directory under
-# /tmp (`fs.write`).
-capabilities = ["runtime.worker", "session.read", "fs.read", "fs.write", "process.spawn"]
+# Freebuff's own state directory for the status command (`fs.read`), raises the
+# host's attention flag by writing into its per-session hook directory under
+# /tmp (`fs.write`), and publishes that same classification as the row's status
+# (`session.integration`).
+capabilities = ["runtime.worker", "session.read", "fs.read", "fs.write", "process.spawn", "session.integration"]
+
+# Declares Freebuff as a provider the host launches and tracks natively: it
+# becomes selectable in the agent picker, `aoe agents`, and
+# `session.default_tool`, and the `session.integration` capability above lets the
+# host read the worker's AgentIntegrationSnapshot as the row's own status.
+# `provider_versions` is a list of semver requirements for the provider runtime
+# that writes those reports (freebuff --version); `resume_arg` no longer exists
+# in this schema. `replies` is omitted (false): a status-only adapter does not
+# own the prompt, so the host discards any prompt the report might carry.
+[[agent_integrations]]
+tool = "freebuff"
+provider_versions = [">=0.2.36, <1.0.0"]
+command = "freebuff"
 
 # Commands the plugin contributes (palette / CLI), namespaced by the host as
 # plugin.dev.example.aoe-freebuf.<id>. The command-id -> worker RPC mapping

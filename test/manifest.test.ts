@@ -116,29 +116,38 @@ function parseToml(source: string): Manifest {
 describe("aoe-plugin.toml", () => {
   const manifest = parseToml(readFileSync(MANIFEST_PATH, "utf8"));
 
-  it("declares an api_version hosts actually parse", () => {
-    // 19 is the schema version that adds the agent-integration contract
-    // ([[agent_integrations]] + the session.integration capability). Until a
-    // released host parses that, declaring 19 here means a rejected manifest.
-    expect(manifest.root.api_version).toBe(18);
+  it("declares the api_version that carries the agent-integration contract", () => {
+    // 19 adds [[agent_integrations]] and the session.integration capability.
+    // The host parses this strictly, so a host below aoe_version rejects the
+    // manifest rather than silently ignoring the block.
+    expect(manifest.root.api_version).toBe(19);
   });
 
-  it("declares no agent integration, which needs api_version 19", () => {
-    expect(manifest.sections.agent_integrations ?? []).toEqual([]);
-    const capabilities = manifest.root.capabilities;
-    expect(Array.isArray(capabilities)).toBe(true);
-    expect(capabilities as Value[]).not.toContain("session.integration");
+  it("declares the freebuff integration the worker publishes status for", () => {
+    const integrations = manifest.sections.agent_integrations ?? [];
+    expect(integrations).toHaveLength(1);
+    expect(integrations[0].tool).toBe("freebuff");
+    expect(integrations[0].command).toBe("freebuff");
+    expect(integrations[0].provider_versions).toEqual([">=0.2.36, <1.0.0"]);
+    // Status only: claiming replies would need an in-process prompt hook.
+    expect(integrations[0].replies).toBeUndefined();
+  });
+
+  it("pins the host line that parses this schema", () => {
+    expect(manifest.root.aoe_version).toBe(">=1.21.0, <2.0.0");
   });
 
   it("declares the capabilities its worker uses and nothing else", () => {
     // session.read lists sessions; process.spawn captures each pane;
-    // fs.read reads Freebuff's own state; fs.write raises the attention flag.
+    // fs.read reads Freebuff's own state; fs.write raises the attention flag;
+    // session.integration publishes that classification as the row's status.
     expect(manifest.root.capabilities).toEqual([
       "runtime.worker",
       "session.read",
       "fs.read",
       "fs.write",
       "process.spawn",
+      "session.integration",
     ]);
   });
 
