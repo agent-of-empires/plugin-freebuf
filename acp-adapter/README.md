@@ -5,9 +5,12 @@ client drive the **Freebuff TUI**. It speaks JSON-RPC over stdio with
 `@agentclientprotocol/sdk` (2.x) and bridges each session to a `freebuff`
 process running inside a dedicated tmux session.
 
-It is a spike, not a product: the package is **not** wired into the plugin
-worker (`src/`), the manifest (`aoe-plugin.toml`), or the root `package.json`.
-Nothing here changes plugin behavior.
+It is not wired into the plugin worker (`src/`), the manifest
+(`aoe-plugin.toml`), or the root `package.json`, because at host
+`api_version = 20` there is no manifest field that would connect it to a
+session. Nothing here changes plugin behavior; [Why it is not wired into a
+session](#why-it-is-not-wired-into-a-session) names the host surface that would
+make it the supported path.
 
 ## Why a TUI bridge
 
@@ -115,17 +118,31 @@ This adapter sees pixels, not events. Specifically:
   `exit`).
 - **Timing is untested against the real TUI** (see below).
 
-## Follow-up for first-class support
+## Why it is not wired into a session
 
-1. **Upstream, in the Freebuff CLI:** a headless/ACP mode — e.g. `freebuff
-   acp` speaking JSON-RPC over stdio — so the agent emits structured events
-   (tool calls, permission prompts, stop reasons) instead of pixels. That is
-   the only way most of the limitations above disappear.
-2. **Then, in aoe core:** register the agent in
-   `src/acp/agent_registry.rs` and describe it in
-   `src/acp/agent_profiles.rs`, pointing at the native ACP entry point. Until
-   then, this package is the experimental adapter such a registration would
-   eventually spawn (or be replaced by).
+An `[[agent_integrations]]` entry declares only `tool`, `provider_versions`,
+`command` and `replies`. `command` is the agent's terminal launch line, not an
+ACP entry point, and the host resolves it as a PATH executable, so the
+plugin-relative launcher trick used by `[runtime]` does not apply here. The
+host's ACP registry lists built-in agents only, and `sessions.create` with
+`initial_turn` plus the structured view accept an agent only when that registry
+or the advertised ACP catalog knows it. A plugin-declared tool is neither, so
+the first task cannot reach this adapter through the host.
+
+Two host changes would make it the supported path:
+
+1. A field on the integration that names the ACP command, so a plugin can
+   declare `node <plugin>/acp-adapter/src/cli.ts` as the agent's ACP entry
+   point.
+2. Registration of that agent in the flow `sessions.create` and the structured
+   view use to resolve an ACP agent, so the host's `pending_initial_turn` is
+   delivered here as `session/prompt` instead of being refused as
+   `unknown_agent`.
+
+Until then, this package stays the adapter such a registration would spawn.
+The alternative upstream fix is a headless mode in the Freebuff CLI (`freebuff
+acp`, JSON-RPC over stdio), which would also remove most of the pixel-level
+limitations above.
 
 ## Development
 

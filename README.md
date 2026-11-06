@@ -56,6 +56,35 @@ Replies stay off: explicit replies need an in-process provider extension
 Freebuff's CLI does not have, so `reply_keys` stays empty and `prompt` stays
 null in the report.
 
+### Starting a session with its first task
+
+This is not available at `api_version = 20`, and the plugin cannot add it on its
+own. The host owns session creation, and the only fields that carry a first
+task reach ACP sessions:
+
+- `[[agent_integrations]]` declares `tool`, `provider_versions`, `command` and
+  `replies`. There is no ACP entry point, no prompt flag and no placeholder in
+  the launch line for the host to fill with a task.
+- The plugin's `command` is the session's complete launch line. The host appends
+  only the caller's `extra_args` and the flags of built-in agents; a plugin tool
+  has no built-in definition, so nothing else is added.
+- `sessions.create { initial_turn }` accepts agents from the host's ACP registry
+  or its advertised ACP catalog, and the registry lists built-in agents only. A
+  plugin-declared `freebuff` tool is refused as `unknown_agent`, so the worker
+  cannot create a Freebuff session with an initial turn either.
+- A session for a plugin-declared tool is a terminal session. The host's only
+  message path for one is `sessions.message.send` (the `aoe send` surface),
+  which types into the pane; it carries no first-task contract and the plugin
+  cannot give it one.
+
+So `aoe add --tool freebuff` still starts a session that waits for its task in
+the TUI. Wiring `acp-adapter/` is the supported end state, but it needs one host
+change first: a way to declare a plugin agent's ACP command and to resolve that
+agent where `sessions.create` and the structured view pick their ACP agent. The
+host's existing `pending_initial_turn` delivery would then hand the first task
+to the adapter as a `session/prompt`, with no keystrokes from outside AoE. Issue
+#8 tracks that host gap.
+
 ## Status command
 
 `Freebuf: status` answers with the installed runtime version and how many of
@@ -95,6 +124,7 @@ src/
   integration.ts       writes the row-status report the host reads
 scripts/
   write-aoe-wrapper.mjs generates the plugin-relative launcher
+acp-adapter/           unwired ACP bridge over tmux (see its README for the contract)
 test/                  worker, heartbeat, pane, attention-flag, state-probe, manifest tests
 ```
 
