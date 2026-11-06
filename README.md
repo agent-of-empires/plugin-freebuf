@@ -56,6 +56,44 @@ Replies stay off: explicit replies need an in-process provider extension
 Freebuff's CLI does not have, so `reply_keys` stays empty and `prompt` stays
 null in the report.
 
+### Starting a session with its first task
+
+`aoe add --tool freebuff "<task>"` still starts a session that waits for its
+task in the TUI. At `api_version = 20` a plugin cannot attach that task itself,
+and the missing piece is on the launch line, not a protocol adapter. This plugin
+does not use ACP.
+
+- `[[agent_integrations]]` declares `tool`, `provider_versions`, `command` and
+  `replies`. There is no prompt flag and no placeholder in `command` for the
+  host to fill with a task; `api_version = 20` adds no integration field (only
+  `ui[].deep_link`).
+- A task reaches a launch line only through a built-in agent's
+  `AgentDef.instruction_flag`, applied to the session's `custom_instruction`.
+  A plugin tool has no `AgentDef`, so the task typed at creation is dropped for
+  it.
+- `command` is the session's complete launch line, and the host appends only the
+  caller's `extra_args`. Nothing else is added.
+- The worker cannot create the session with the task either: `sessions.create`
+  with `initial_turn` accepts only agents in the host's ACP registry or
+  advertised catalog, and a plugin-declared `freebuff` tool is refused as
+  `unknown_agent`. That route is ACP, which this plugin does not use.
+
+The Freebuff side is missing its half too: `freebuff --help` lists `login`,
+`doctor`, `--continue`, `--cwd` and `--trust-agents`, with no argument that
+seeds a first turn. So even a launcher handed the task would have nothing to
+pass it to.
+
+Two changes would make `aoe add --tool freebuff "<task>"` start the session with
+that task, both without ACP:
+
+1. Host: a task placeholder or instruction template on the integration, filled
+   with the session's initial task and appended to `command` the way
+   `instruction_flag` is for built-in agents.
+2. Freebuff: a launch argument that seeds the first turn, so the launcher can
+   pass the task through instead of typing into the TUI.
+
+Issue #8 tracks both.
+
 ## Status command
 
 `Freebuf: status` answers with the installed runtime version and how many of
@@ -95,6 +133,7 @@ src/
   integration.ts       writes the row-status report the host reads
 scripts/
   write-aoe-wrapper.mjs generates the plugin-relative launcher
+acp-adapter/           ACP bridge over tmux, an experiment the plugin does not use
 test/                  worker, heartbeat, pane, attention-flag, state-probe, manifest tests
 ```
 

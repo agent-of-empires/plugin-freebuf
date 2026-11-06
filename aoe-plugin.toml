@@ -14,6 +14,9 @@ version = "0.1.0"
 # AgentIntegrationSnapshot as the session row's own status. The host parses
 # strictly, so a host that does not know this schema rejects the manifest
 # instead of ignoring the block; `aoe_version` is the floor that parses it.
+# 20 adds only `ui[].deep_link`; it adds no agent-integration field, and in
+# particular no way to hand a new session its first task (issue #8), so this
+# manifest stays at the schema it actually uses.
 api_version = 19
 # Host-app compatibility range (a different axis from api_version). The host
 # refuses install/update outside this range. Requires api_version >= 4.
@@ -39,6 +42,12 @@ capabilities = ["runtime.worker", "session.read", "fs.read", "fs.write", "proces
 # that writes those reports (freebuff --version); `resume_arg` no longer exists
 # in this schema. `replies` is omitted (false): a status-only adapter does not
 # own the prompt, so the host discards any prompt the report might carry.
+# `command` is the complete launch line the host runs for this tool. It has no
+# placeholder for a first task: the host appends one only for built-in agents,
+# through their AgentDef instruction flag, and `freebuff` has no launch argument
+# that seeds a first turn. A session started here waits for its task in the TUI.
+# README.md ("Starting a session with its first task") and issue #8 record what
+# would close that gap.
 [[agent_integrations]]
 tool = "freebuff"
 provider_versions = [">=0.2.36, <1.0.0"]

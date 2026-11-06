@@ -5,9 +5,12 @@ client drive the **Freebuff TUI**. It speaks JSON-RPC over stdio with
 `@agentclientprotocol/sdk` (2.x) and bridges each session to a `freebuff`
 process running inside a dedicated tmux session.
 
-It is a spike, not a product: the package is **not** wired into the plugin
-worker (`src/`), the manifest (`aoe-plugin.toml`), or the root `package.json`.
-Nothing here changes plugin behavior.
+It is an experiment, not the plugin's route to a first task. It is not wired
+into the plugin worker (`src/`), the manifest (`aoe-plugin.toml`), or the root
+`package.json`, and the plugin does not need ACP: a session's first task belongs
+on the launch line. Nothing here changes plugin behavior; the root README's
+"Starting a session with its first task" and issue #8 describe the route that is
+actually wanted.
 
 ## Why a TUI bridge
 
@@ -115,17 +118,24 @@ This adapter sees pixels, not events. Specifically:
   `exit`).
 - **Timing is untested against the real TUI** (see below).
 
-## Follow-up for first-class support
+## Why the plugin does not wire it in
 
-1. **Upstream, in the Freebuff CLI:** a headless/ACP mode — e.g. `freebuff
-   acp` speaking JSON-RPC over stdio — so the agent emits structured events
-   (tool calls, permission prompts, stop reasons) instead of pixels. That is
-   the only way most of the limitations above disappear.
-2. **Then, in aoe core:** register the agent in
-   `src/acp/agent_registry.rs` and describe it in
-   `src/acp/agent_profiles.rs`, pointing at the native ACP entry point. Until
-   then, this package is the experimental adapter such a registration would
-   eventually spawn (or be replaced by).
+Freebuff has no ACP mode and no headless mode, so the only way to automate it
+from outside is to drive its screen, which is what this package does. That is
+not how the plugin wants to deliver a first task: `aoe add --tool freebuff
+"<task>"` should pass the task to the process it starts, not type it into a TUI.
+
+The launch line cannot carry it yet. An `[[agent_integrations]]` entry declares
+only `tool`, `provider_versions`, `command` and `replies`, and the host fills a
+task into `command` only for built-in agents, through their `AgentDef`
+instruction flag. Freebuff has no argument that seeds a first turn either. Those
+two gaps are the route the plugin is waiting on, both outside ACP.
+
+So this package stays a separate experiment: an ACP client can point at
+`src/cli.ts` and drive a Freebuff pane, but the plugin does not, and nothing in
+`aoe add` depends on it. A host ACP entry point for plugin-declared agents would
+be one way to make it reachable from `sessions.create`; that is not needed for
+the first-task goal and this package does not ask for it.
 
 ## Development
 
