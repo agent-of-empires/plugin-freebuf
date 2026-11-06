@@ -58,32 +58,41 @@ null in the report.
 
 ### Starting a session with its first task
 
-This is not available at `api_version = 20`, and the plugin cannot add it on its
-own. The host owns session creation, and the only fields that carry a first
-task reach ACP sessions:
+`aoe add --tool freebuff "<task>"` still starts a session that waits for its
+task in the TUI. At `api_version = 20` a plugin cannot attach that task itself,
+and the missing piece is on the launch line, not a protocol adapter. This plugin
+does not use ACP.
 
 - `[[agent_integrations]]` declares `tool`, `provider_versions`, `command` and
-  `replies`. There is no ACP entry point, no prompt flag and no placeholder in
-  the launch line for the host to fill with a task.
-- The plugin's `command` is the session's complete launch line. The host appends
-  only the caller's `extra_args` and the flags of built-in agents; a plugin tool
-  has no built-in definition, so nothing else is added.
-- `sessions.create { initial_turn }` accepts agents from the host's ACP registry
-  or its advertised ACP catalog, and the registry lists built-in agents only. A
-  plugin-declared `freebuff` tool is refused as `unknown_agent`, so the worker
-  cannot create a Freebuff session with an initial turn either.
-- A session for a plugin-declared tool is a terminal session. The host's only
-  message path for one is `sessions.message.send` (the `aoe send` surface),
-  which types into the pane; it carries no first-task contract and the plugin
-  cannot give it one.
+  `replies`. There is no prompt flag and no placeholder in `command` for the
+  host to fill with a task; `api_version = 20` adds no integration field (only
+  `ui[].deep_link`).
+- A task reaches a launch line only through a built-in agent's
+  `AgentDef.instruction_flag`, applied to the session's `custom_instruction`.
+  A plugin tool has no `AgentDef`, so the task typed at creation is dropped for
+  it.
+- `command` is the session's complete launch line, and the host appends only the
+  caller's `extra_args`. Nothing else is added.
+- The worker cannot create the session with the task either: `sessions.create`
+  with `initial_turn` accepts only agents in the host's ACP registry or
+  advertised catalog, and a plugin-declared `freebuff` tool is refused as
+  `unknown_agent`. That route is ACP, which this plugin does not use.
 
-So `aoe add --tool freebuff` still starts a session that waits for its task in
-the TUI. Wiring `acp-adapter/` is the supported end state, but it needs one host
-change first: a way to declare a plugin agent's ACP command and to resolve that
-agent where `sessions.create` and the structured view pick their ACP agent. The
-host's existing `pending_initial_turn` delivery would then hand the first task
-to the adapter as a `session/prompt`, with no keystrokes from outside AoE. Issue
-#8 tracks that host gap.
+The Freebuff side is missing its half too: `freebuff --help` lists `login`,
+`doctor`, `--continue`, `--cwd` and `--trust-agents`, with no argument that
+seeds a first turn. So even a launcher handed the task would have nothing to
+pass it to.
+
+Two changes would make `aoe add --tool freebuff "<task>"` start the session with
+that task, both without ACP:
+
+1. Host: a task placeholder or instruction template on the integration, filled
+   with the session's initial task and appended to `command` the way
+   `instruction_flag` is for built-in agents.
+2. Freebuff: a launch argument that seeds the first turn, so the launcher can
+   pass the task through instead of typing into the TUI.
+
+Issue #8 tracks both.
 
 ## Status command
 
@@ -124,7 +133,7 @@ src/
   integration.ts       writes the row-status report the host reads
 scripts/
   write-aoe-wrapper.mjs generates the plugin-relative launcher
-acp-adapter/           unwired ACP bridge over tmux (see its README for the contract)
+acp-adapter/           ACP bridge over tmux, an experiment the plugin does not use
 test/                  worker, heartbeat, pane, attention-flag, state-probe, manifest tests
 ```
 
