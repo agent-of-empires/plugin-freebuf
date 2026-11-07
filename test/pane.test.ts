@@ -50,13 +50,13 @@ describe("pane classification", () => {
     expect(classifyPane(`${RUNNING_PANE}\n${WAITING_PANE}`)).toBe("waiting");
   });
 
-  it("ignores the words when they appear in transcript output", () => {
-    // Agent prose quoting the UI must not turn into a status claim.
-    expect(classifyPane(" … the pane says working... and then Close ✕ is drawn")).toBe("idle");
+  it("ignores status text quoted in an idle transcript", () => {
+    expect(classifyPane(`The pane says thinking...  2m 31s  ■ Esc\n${IDLE_PANE}`)).toBe("idle");
+    expect(classifyPane(` thinking...  2m 31s  ■ Esc\nSome explanation\n${IDLE_PANE}`)).toBe("idle");
   });
 
   it("strips colour codes before matching", () => {
     expect(stripAnsi("\u001b[1m\u001b[32mworking...\u001b[0m  ■ Esc")).toBe("working...  ■ Esc");
-    expect(classifyPane("\u001b[2m working...   10s   ■ Esc\u001b[0m")).toBe("running");
+    expect(classifyPane("\u001b[2m working...   10s   ■ Esc\u001b[0m\n ❯ Add to the current task")).toBe("running");
   });
 });
