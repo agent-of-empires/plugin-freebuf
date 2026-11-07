@@ -38,6 +38,10 @@ describe("pane classification", () => {
     expect(classifyPane(RUNNING_PANE)).toBe("running");
   });
 
+  it("reads the thinking status line as running", () => {
+    expect(classifyPane(" thinking...  2m 31s  ■ Esc\n ❯ Add to the current task")).toBe("running");
+  });
+
   it("reads a parked prompt with no status line as idle", () => {
     expect(classifyPane(IDLE_PANE)).toBe("idle");
   });

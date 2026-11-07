@@ -15,7 +15,7 @@ classifies its built-in agents:
 | Pane | Class | Flag |
 |---|---|---|
 | `Some questions for you`, `Close ✕`, `Do you want to proceed`, `(y/n)` | waiting | raised |
-| `working...  <time>  ■ Esc` | running | lowered |
+| `working...` or `thinking...` with `■ Esc` | running | lowered |
 | the input prompt and its footer, nothing else | idle | lowered |
 | capture failed (no pane, CLI missing, timeout) | unknown | left alone, so it expires |
 

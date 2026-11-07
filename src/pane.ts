@@ -74,8 +74,8 @@ const WAITING: RegExp[] = [
   /\(y\/n\)/i,
 ];
 
-/** The turn status line: "working...  1m 23s  ■ Esc". */
-const RUNNING: RegExp[] = [/^.*working\.\.\..*■\s*Esc.*$/m];
+/** The turn status line: "working..."/"thinking..." followed by "■ Esc". */
+const RUNNING: RegExp[] = [/^.*(?:working|thinking)\.\.\..*■\s*Esc.*$/m];
 
 export function stripAnsi(text: string): string {
   // eslint-disable-next-line no-control-regex -- matching the escape byte is the point
