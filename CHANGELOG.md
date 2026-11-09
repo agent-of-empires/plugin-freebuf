@@ -14,6 +14,10 @@ The format follows [Conventional Commits](https://www.conventionalcommits.org/).
 - `process.spawn` capability, for the pane capture.
 - Tests: classification against captured panes (dialog, working line, parked prompt, prose that merely quotes the UI, ANSI), and heartbeat assertions for raising, lowering, unknown panes, other tools, and the host going away.
 
+### Fixed
+
+- A working session no longer reads as `idle`: Freebuff 0.2.36 wraps the input prompt in a rounded box, so the `working...` / `thinking...` status line is no longer directly above `❯`. The status line now counts when only the input box's borders and blank rows separate it from the prompt (a typed draft still counts), while the same words quoted in transcript prose are still ignored.
+
 ### Changed
 
 - Attention is screen-driven, not mtime-driven: the chat-activity heuristic (`ATTENTION_WINDOW_MS`, `needsAttention`) is gone, so "working" means the pane says working, not that a file moved.
