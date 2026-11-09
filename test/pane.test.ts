@@ -73,7 +73,8 @@ describe("pane classification", () => {
   });
 
   it("ignores a status line far above the prompt in transcript text", () => {
-    const transcript = [" thinking...  2m 31s  ■ Esc", ...Array(20).fill(" prose"), " ❯ prompt"].join("\n");
+    // Blank rows exercise the MAX_CHROME_ROWS distance limit; prose rows stop the matcher early.
+    const transcript = [" thinking...  2m 31s  ■ Esc", ...Array(20).fill(""), " ❯ prompt"].join("\n");
     expect(classifyPane(transcript)).toBe("idle");
   });
 

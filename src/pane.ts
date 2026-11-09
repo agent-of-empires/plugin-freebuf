@@ -75,7 +75,7 @@ const WAITING: RegExp[] = [
 ];
 
 /** Freebuff's live turn status line. */
-const STATUS_LINE = /^[ \t]*(?:working|thinking)\.\.\.[^\n]*■[ \t]*Esc\b[^\n]*$/;
+const STATUS_LINE = /^[ \t]*(?:working|thinking)\.\.\.[^\n]*■[ \t]*Esc\b[ \t]*$/;
 
 /**
  * The input prompt. Freebuff draws it inside a rounded box (with blank rows)
