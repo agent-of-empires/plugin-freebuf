@@ -74,8 +74,41 @@ const WAITING: RegExp[] = [
   /\(y\/n\)/i,
 ];
 
-/** Active turn chrome sits immediately above Freebuff's input prompt. */
-const RUNNING: RegExp[] = [/^[ \t]*(?:working|thinking)\.\.\.[^\n]*■[ \t]*Esc[ \t]*\r?\n[ \t]*❯/m];
+/** Freebuff's live turn status line. */
+const STATUS_LINE = /^[ \t]*(?:working|thinking)\.\.\.[^\n]*■[ \t]*Esc\b[^\n]*$/;
+
+/**
+ * The input prompt. Freebuff draws it inside a rounded box (with blank rows)
+ * since 0.2.36, so the prompt row starts with a border column; the focused
+ * composer shows `▍`, an unfocused one `❯`.
+ */
+const PROMPT_LINE = /^[ \t]*(?:│[ \t]*)?(?:❯|▍)/;
+
+/** The top border of that input box, which is the prompt row's frame. */
+const INPUT_BOX_TOP = /^[ \t]*╭─+╮[ \t]*$/;
+
+/** Rows that may sit between the status line and the prompt: borders and blanks. */
+const CHROME_ROW = /^[ \t]*[│╭╮╰╯─]*[ \t]*$/;
+
+/** How far above the prompt the status line may sit; the input box is a few rows tall. */
+const MAX_CHROME_ROWS = 12;
+
+/**
+ * True when a live-turn status line sits in the chrome above the input prompt.
+ * The phrase also shows up in the transcript (agent prose, or the prompt quoted
+ * back), so it only counts when nothing but blank and border rows separate it
+ * from the prompt -- not the explanation lines a quoted status is followed by.
+ */
+function statusAbovePrompt(lines: readonly string[]): boolean {
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!STATUS_LINE.test(lines[i])) continue;
+    for (let j = i + 1; j < lines.length && j <= i + MAX_CHROME_ROWS; j += 1) {
+      if (PROMPT_LINE.test(lines[j]) || INPUT_BOX_TOP.test(lines[j])) return true;
+      if (!CHROME_ROW.test(lines[j])) break;
+    }
+  }
+  return false;
+}
 
 export function stripAnsi(text: string): string {
   // eslint-disable-next-line no-control-regex -- matching the escape byte is the point
@@ -86,7 +119,7 @@ export function stripAnsi(text: string): string {
 export function classifyPane(text: string): PaneState {
   const clean = stripAnsi(text);
   if (WAITING.some((rule) => rule.test(clean))) return "waiting";
-  if (RUNNING.some((rule) => rule.test(clean))) return "running";
+  if (statusAbovePrompt(clean.split(/\r?\n/))) return "running";
   return "idle";
 }
 
