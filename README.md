@@ -41,7 +41,7 @@ Agent of Empires' first-class route sets the row's own status: the shipped
 manifest declares `api_version = 19` with an `[[agent_integrations]]` entry and
 the `session.integration` capability, and the worker writes
 `AgentIntegrationSnapshot` reports into the session's hook directory
-(`integration-dev.example.aoe-freebuf.json`). The host reads those to override
+(`integration-agent-of-empires.aoe-freebuf.json`). The host reads those to override
 the row's status and to expose Freebuff in `aoe agents`, the agent picker, and
 `session.default_tool`.
 
@@ -110,7 +110,7 @@ npm test        # vitest
 Drive the worker by hand (it reads one JSON-RPC request per line on stdin):
 
 ```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"plugin.dev.example.aoe-freebuf.status","params":{}}' \
+echo '{"jsonrpc":"2.0","id":1,"method":"plugin.agent-of-empires.aoe-freebuf.status","params":{}}' \
   | node dist/index.js
 ```
 

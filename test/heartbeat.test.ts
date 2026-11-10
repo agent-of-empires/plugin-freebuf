@@ -64,7 +64,7 @@ describe("attention heartbeat", () => {
   }
 
   function report(hookBase: string, id: string): Record<string, unknown> | null {
-    const file = path.join(hookBase, id, "integration-dev.example.aoe-freebuf.json");
+    const file = path.join(hookBase, id, "integration-agent-of-empires.aoe-freebuf.json");
     return existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>) : null;
   }
 
