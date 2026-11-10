@@ -5,7 +5,7 @@
 # that schema. Field-by-field reference:
 # https://agent-of-empires.com/docs/plugin-api/
 
-id = "dev.example.aoe-freebuf"
+id = "agent-of-empires.aoe-freebuf"
 name = "Freebuf"
 version = "0.1.0"
 # Manifest schema / host API version. 19 adds the provider-native agent
@@ -45,7 +45,7 @@ provider_versions = [">=0.2.36, <1.0.0"]
 command = "freebuff"
 
 # Commands the plugin contributes (palette / CLI), namespaced by the host as
-# plugin.dev.example.aoe-freebuf.<id>. The command-id -> worker RPC mapping
+# plugin.agent-of-empires.aoe-freebuf.<id>. The command-id -> worker RPC mapping
 # is host convention; the worker answers a method ending in `.status`.
 [[commands]]
 id = "status"
@@ -53,7 +53,7 @@ title = "Freebuf: status"
 description = "Show the Freebuf status summary."
 
 # A setting, rendered on the TUI and web settings surfaces and stored under
-# [plugins."dev.example.aoe-freebuf".settings]. The worker reads it back at
+# [plugins."agent-of-empires.aoe-freebuf".settings]. The worker reads it back at
 # runtime via the config.get host RPC.
 [[settings]]
 key = "enabled"

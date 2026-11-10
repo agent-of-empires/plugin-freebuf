@@ -16,7 +16,8 @@ import path from "node:path";
 import type { PaneState } from "./pane.js";
 
 /** Must match `id` in aoe-plugin.toml: the report file is named after it. */
-export const PLUGIN_ID = "dev.example.aoe-freebuf";
+export const PLUGIN_ID = "agent-of-empires.aoe-freebuf";
+
 
 /** Report file schema version; the host requires exactly 1. */
 export const SCHEMA_VERSION = 1;

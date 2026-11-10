@@ -159,6 +159,6 @@ describe("aoe-plugin.toml", () => {
 
   it("stays in a namespace a community install may claim", () => {
     // aoe.* and agent-of-empires.* are reserved for bundled/featured plugins.
-    expect(manifest.root.id).toBe("dev.example.aoe-freebuf");
+    expect(manifest.root.id).toBe("agent-of-empires.aoe-freebuf");
   });
 });
