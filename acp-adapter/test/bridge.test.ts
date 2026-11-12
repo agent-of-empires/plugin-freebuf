@@ -2,11 +2,12 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   findPermissionPrompt,
+  resumeChat,
   runTurn,
   type BridgeConfig,
   type TurnNotice,
 } from "../src/bridge.ts";
-import { FakeClock, FakePane, READY_SCREEN } from "./fake.ts";
+import { composerScreen, FakeClock, FakePane, READY_SCREEN } from "./fake.ts";
 
 const meta = { sessionId: "s1", cwd: "/tmp/project" };
 
@@ -16,9 +17,7 @@ function testConfig(clock: FakeClock, overrides: Partial<BridgeConfig> = {}): Br
     quiescenceMs: 300,
     echoTimeoutMs: 500,
     maxTurnMs: 10_000,
-    // Most screens here are not shaped like the real TUI, so the readiness wait
-    // would only burn virtual time; the test that is about readiness sets it.
-    startupTimeoutMs: 0,
+    startupTimeoutMs: 1_000,
     now: clock.now,
     sleep: clock.sleep,
     ...overrides,
@@ -46,18 +45,18 @@ function collect() {
 describe("runTurn", () => {
   it("types the prompt literally, submits it, and streams only new output", async () => {
     const clock = new FakeClock();
-    const pane = new FakePane(meta, "boot");
+    const pane = new FakePane(meta, composerScreen("boot"));
     const sink = collect();
     pane.onSend = (keys) => {
       if (keys === "Enter") {
-        pane.screen = "boot\n> do the thing";
+        pane.screen = composerScreen("boot", "> do the thing");
       }
     };
     let produced = false;
     clock.onAdvance = (time) => {
       if (time >= 400 && !produced) {
         produced = true;
-        pane.screen = "boot\n> do the thing\nthe answer is 42";
+        pane.screen = composerScreen("boot", "> do the thing", "the answer is 42");
       }
     };
 
@@ -75,16 +74,18 @@ describe("runTurn", () => {
 
   it("does not stream the TUI echo of the user's own prompt", async () => {
     const clock = new FakeClock();
-    const pane = new FakePane(meta, "boot");
+    const pane = new FakePane(meta, composerScreen("boot"));
     const sink = collect();
     pane.onSend = (keys) => {
       if (keys === "Enter") {
-        pane.screen = "boot\n> write the parser";
+        pane.screen = composerScreen("boot", "> write the parser");
       }
     };
+    // After the readiness wait, so the answer is new output rather than part of
+    // the baseline the turn starts from.
     clock.onAdvance = (time) => {
-      if (time >= 300) {
-        pane.screen = "boot\n> write the parser\nparser written";
+      if (time >= 600) {
+        pane.screen = composerScreen("boot", "> write the parser", "parser written");
       }
     };
 
@@ -97,16 +98,16 @@ describe("runTurn", () => {
 
   it("does not stream a prompt echo that arrives after the echo window", async () => {
     const clock = new FakeClock();
-    const pane = new FakePane(meta, "boot");
+    const pane = new FakePane(meta, composerScreen("boot"));
     const sink = collect();
     // The TUI only puts the user's message in the transcript well after the
     // window the bridge initially waits, which is what a long prompt does.
     clock.onAdvance = (time) => {
       if (time >= 900) {
-        pane.screen = "boot\n   [03:52 PM]\n   remember the word PLUM ⎘";
+        pane.screen = composerScreen("boot", "   [03:52 PM]", "   remember the word PLUM ⎘");
       }
       if (time >= 1_500) {
-        pane.screen = "boot\n   [03:52 PM]\n   remember the word PLUM ⎘\n\n  PLUM";
+        pane.screen = composerScreen("boot", "   [03:52 PM]", "   remember the word PLUM ⎘", "", "  PLUM");
       }
     };
 
@@ -124,7 +125,7 @@ describe("runTurn", () => {
 
   it("stops with cancelled when the turn is interrupted", async () => {
     const clock = new FakeClock();
-    const pane = new FakePane(meta, "boot");
+    const pane = new FakePane(meta, composerScreen("boot"));
     const sink = collect();
     let cancelled = false;
     sink.events.isCancelled = () => cancelled;
@@ -142,16 +143,18 @@ describe("runTurn", () => {
 
   it("cuts the turn off at maxTurnMs when the pane never goes quiet", async () => {
     const clock = new FakeClock();
-    const pane = new FakePane(meta, "boot");
+    const pane = new FakePane(meta, composerScreen("boot"));
     const sink = collect();
     pane.onSend = (keys) => {
       if (keys === "Enter") {
-        pane.screen = "boot\n> go";
+        pane.screen = composerScreen("boot", "> go");
       }
     };
+    // Churn starts once the TUI has settled, so the readiness wait can finish
+    // and the turn itself is what never goes quiet.
     clock.onAdvance = (time) => {
-      if (time >= 200) {
-        pane.screen = `boot\n> go\nstep ${time}`;
+      if (time >= 600) {
+        pane.screen = composerScreen("boot", "> go", `step ${time}`);
       }
     };
 
@@ -166,11 +169,11 @@ describe("runTurn", () => {
 
   it("finishes with end_turn when the pane never changes at all", async () => {
     const clock = new FakeClock();
-    const pane = new FakePane(meta, "boot");
+    const pane = new FakePane(meta, composerScreen("boot"));
     const sink = collect();
     pane.onSend = (keys) => {
       if (keys === "Enter") {
-        pane.screen = "boot\n> silent";
+        pane.screen = composerScreen("boot", "> silent");
       }
     };
 
@@ -260,18 +263,18 @@ describe("runTurn", () => {
 
   it("reports the permission-prompt limitation exactly once per turn", async () => {
     const clock = new FakeClock();
-    const pane = new FakePane(meta, "boot");
+    const pane = new FakePane(meta, composerScreen("boot"));
     const sink = collect();
     pane.onSend = (keys) => {
       if (keys === "Enter") {
-        pane.screen = "boot\n> run it";
+        pane.screen = composerScreen("boot", "> run it");
       }
     };
     clock.onAdvance = (time) => {
-      if (time >= 200 && time < 300) {
-        pane.screen = "boot\n> run it\nDo you want to allow this? y/n";
-      } else if (time >= 300) {
-        pane.screen = "boot\n> run it\nallowed";
+      if (time >= 600 && time < 900) {
+        pane.screen = composerScreen("boot", "> run it", "Do you want to allow this? y/n");
+      } else if (time >= 900) {
+        pane.screen = composerScreen("boot", "> run it", "allowed");
       }
     };
 
@@ -282,6 +285,165 @@ describe("runTurn", () => {
     assert.equal(sink.notices[0].severity, "warning");
     assert.match(sink.notices[0].title, /not bridged/);
     assert.ok(sink.chunks.join("\n").includes("allowed"));
+  });
+});
+
+describe("echo handling", () => {
+  it("suppresses an echo of a prompt the TUI wrapped over several rows", async () => {
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, composerScreen("boot"));
+    const sink = collect();
+    const prompt = "summarise the failing tests in the parser module and say why each one broke";
+    // The TUI wraps the message, so the transcript holds the same words split
+    // across rows rather than the single line that was sent.
+    const wrapped = composerScreen(
+      "boot",
+      "   [03:52 PM]",
+      "   summarise the failing tests in the parser ⎘",
+      "   module and say why each one broke",
+    );
+    pane.onSend = (keys) => {
+      if (keys === "Enter") pane.screen = wrapped;
+    };
+    clock.onAdvance = (time) => {
+      if (time >= 600) {
+        pane.screen = composerScreen(
+          "boot",
+          "   [03:52 PM]",
+          "   summarise the failing tests in the parser ⎘",
+          "   module and say why each one broke",
+          "",
+          "  three tests broke on timeouts",
+        );
+      }
+    };
+
+    await runTurn({ pane, promptText: prompt, config: testConfig(clock), events: sink.events });
+
+    const streamed = sink.chunks.join("\n");
+    assert.equal(streamed.includes("summarise the failing tests"), false, "wrapped echo leaked as output");
+    assert.ok(streamed.includes("three tests broke"));
+  });
+
+  it("still suppresses the echo when the prompt was sent before", async () => {
+    // The same words are already in the transcript from the earlier turn, so a
+    // plain substring search finds the old copy and lets the new echo through.
+    const clock = new FakeClock();
+    const sink = collect();
+    const repeated = "run the tests";
+    const earlier = composerScreen("boot", "   [03:51 PM]", `   ${repeated} ⎘`, "", "  all green");
+    const pane = new FakePane(meta, earlier);
+    pane.onSend = (keys) => {
+      if (keys === "Enter") pane.screen = composerScreen("boot", "   [03:52 PM]", `   ${repeated} ⎘`);
+    };
+    clock.onAdvance = (time) => {
+      if (time >= 600) {
+        pane.screen = composerScreen("boot", "   [03:52 PM]", `   ${repeated} ⎘`, "", "  still green");
+      }
+    };
+
+    await runTurn({ pane, promptText: repeated, config: testConfig(clock), events: sink.events });
+
+    const streamed = sink.chunks.join("\n");
+    assert.equal(streamed.includes(repeated), false, "repeat echo leaked as output");
+    assert.ok(streamed.includes("still green"));
+  });
+});
+
+describe("resumeChat", () => {
+  /** The settled screen of a pane whose footer names `title` as the open chat. */
+  const withFooter = (title: string): string =>
+    [
+      "  freebuff",
+      "",
+      "╭──────────────────────────────╮",
+      "│  ▍Enter a coding task        │",
+      "╰──────────────────────────────╯",
+      ` DeepSeek V4.1 Flash Slow · /tmp · Chat: ${title}`,
+      " ← for history · ? for help",
+    ].join("\n");
+
+  /** A pane showing one chat, scripted so `/history` opens the picker. */
+  function scriptedPane(footerTitle: string, rows: string[]): { pane: FakePane; clock: FakeClock; sent: string[] } {
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, withFooter(footerTitle));
+    let picker = false;
+    pane.onSend = (keys) => {
+      if (keys === "/history") {
+        picker = true;
+        return;
+      }
+      if (keys !== "Enter") return;
+      if (picker) {
+        picker = false;
+        pane.screen = [
+          "                            Select a chat to resume",
+          "  ▍Search chats...",
+          "  ╭─────────────────────────────────────────────────────╮",
+          ...rows.map((row) => `  │ ${row} │`),
+          "  ╰─────────────────────────────────────────────────────╯",
+          "  ↑↓ navigate · → / Enter open chat · Esc cancel",
+        ].join("\n");
+        return;
+      }
+      if (pane.screen.includes("Select a chat")) {
+        const title = rows[0].split("msgs")[1].trim();
+        pane.screen = withFooter(title);
+      }
+    };
+    return { pane, clock, sent: [] };
+  }
+
+  it("does not accept a footer title that only starts the same way", async () => {
+    // `--continue` opened a different chat whose name shares a prefix: taking
+    // that as a match would replay the wrong conversation.
+    const { pane, clock } = scriptedPane("Fix tests on macOS", ["just now   3 msgs   Fix tests"]);
+    const result = await resumeChat({
+      pane,
+      config: testConfig(clock),
+      title: "Fix tests",
+    });
+
+    const keys = pane.sent.map((entry) => entry.keys);
+    assert.deepEqual(keys.slice(0, 2), ["/history", "Enter"], "the picker was never opened");
+    assert.equal(result.restored, true);
+    assert.equal(result.title, "Fix tests");
+  });
+});
+
+describe("readiness", () => {
+  it("fails a turn instead of typing into a pane that never showed its prompt", async () => {
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, "installing...");
+    const sink = collect();
+
+    await assert.rejects(
+      () => runTurn({ pane, promptText: "hello", config: testConfig(clock, { startupTimeoutMs: 1_000 }), events: sink.events }),
+      /never showed its input prompt/,
+    );
+    assert.deepEqual(pane.sent, [], "keys were sent into an unusable pane");
+  });
+
+  it("does not type the prompt when the turn is cancelled during the wait", async () => {
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, composerScreen("boot"));
+    const sink = collect();
+    let cancelled = false;
+    const originalCapture = pane.capture.bind(pane);
+    pane.capture = async () => {
+      cancelled = true;
+      return originalCapture();
+    };
+
+    const result = await runTurn({
+      pane,
+      promptText: "hello",
+      config: testConfig(clock),
+      events: { ...sink.events, isCancelled: () => cancelled },
+    });
+
+    assert.equal(result.stopReason, "cancelled");
+    assert.deepEqual(pane.sent, [], "the prompt was typed after the turn was cancelled");
   });
 });
 

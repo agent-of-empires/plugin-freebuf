@@ -20,6 +20,15 @@ export const READY_SCREEN = [
   " ← for history · ? for help",
 ].join("\n");
 
+/**
+ * Builds a settled screen out of the given transcript rows: anything a test
+ * wants on screen, with the real composer box below it, so the readiness wait
+ * and the chrome cut see the shape the TUI actually draws.
+ */
+export function composerScreen(...rows: string[]): string {
+  return [...rows, "", ...READY_SCREEN.split("\n").slice(2)].join("\n");
+}
+
 /** Deterministic clock: `sleep` advances virtual time instead of waiting. */
 export class FakeClock {
   time = 0;

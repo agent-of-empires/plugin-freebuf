@@ -124,11 +124,20 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
 
   // Type only once the TUI is up and steady. Without this the prompt is sent
   // into a still-painting startup screen and silently dropped.
-  if (!(await waitForReady(pane, config, () => events.isCancelled()))) {
+  const readiness = await waitForReady(pane, config, () => events.isCancelled());
+  if (readiness === "cancelled") {
     return { stopReason: "cancelled", streamedChars };
+  }
+  if (readiness === "timeout") {
+    throw new Error(NOT_READY);
   }
 
   const baseline = await pane.capture();
+  // The capture can take a while; a cancel that landed during it must not be
+  // followed by typing the prompt.
+  if (events.isCancelled()) {
+    return { stopReason: "cancelled", streamedChars };
+  }
   const tracker = new ScreenTracker(baseline);
 
   // Type the prompt as literal text, then submit it. The literal flag matters:
@@ -144,17 +153,28 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
   // that must be suppressed. If no echo ever appears, the original baseline is
   // kept and nothing is skipped.
   const promptNeedle = promptText.split("\n")[0].trim();
+  // The TUI wraps a long prompt over several rows, so the echo has to be found
+  // in whitespace-collapsed text: the needle is one source line and never
+  // matches the rows as they are drawn.
+  const echoNeedle = collapse(promptNeedle);
+  // A prompt the user has sent before is already in the transcript, so finding
+  // the needle is not enough: the echo is the one occurrence past the baseline.
+  const baselineEchoes = echoNeedle === "" ? 0 : occurrences(collapse(transcriptText(baseline)), echoNeedle);
+  const echoed = (screen: string): boolean => {
+    if (echoNeedle === "") return false;
+    return occurrences(collapse(transcriptText(screen)), echoNeedle) > baselineEchoes;
+  };
   // Still waiting for the echo: the main loop keeps watching for it, because a
   // long prompt can take longer to reach the transcript than the initial window
   // and the echo would otherwise be streamed back as assistant output.
-  let echoPending = promptNeedle !== "";
+  let echoPending = echoNeedle !== "";
   const echoDeadline = config.now() + config.echoTimeoutMs;
   while (echoPending && config.now() < echoDeadline) {
     if (events.isCancelled()) {
       break;
     }
     const screen = await pane.capture();
-    if (promptNeedle !== "" && transcriptText(screen).includes(promptNeedle)) {
+    if (echoed(screen)) {
       tracker.reset(screen);
       echoPending = false;
       break;
@@ -174,7 +194,7 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
     }
 
     const screen = await pane.capture();
-    if (echoPending && transcriptText(screen).includes(promptNeedle)) {
+    if (echoPending && echoed(screen)) {
       // The echo arrived late: rebase on it instead of streaming the user's own
       // message back as assistant output.
       tracker.reset(screen);
@@ -253,7 +273,9 @@ export type ResumeRequest = {
  */
 export async function resumeChat(request: ResumeRequest): Promise<ResumeResult> {
   const { pane, config, title: expected } = request;
-  await waitForReady(pane, config, () => false);
+  if ((await waitForReady(pane, config, () => false)) === "timeout") {
+    throw new Error(NOT_READY);
+  }
 
   let screen = await pane.capture();
   let title = chatTitle(screen);
@@ -275,7 +297,7 @@ export async function resumeChat(request: ResumeRequest): Promise<ResumeResult> 
     await config.sleep(config.pollIntervalMs);
   }
 
-  const index = rows.findIndex((row) => titleMatches(row, expected));
+  const index = rows.findIndex((row) => titleMatches(row, expected, "row"));
   if (index < 0) {
     // Nothing matched: close the picker and keep whatever chat is open.
     await pane.send("Escape");
@@ -285,21 +307,28 @@ export async function resumeChat(request: ResumeRequest): Promise<ResumeResult> 
     await pane.send("Down");
   }
   await pane.send(SUBMIT_KEY);
-  await waitForReady(pane, config, () => false);
+  if ((await waitForReady(pane, config, () => false)) === "timeout") {
+    throw new Error(NOT_READY);
+  }
   screen = await pane.capture();
   title = chatTitle(screen);
   return { restored: titleMatches(title, expected), title, messages: resumedMessages(screen) };
 }
 
 /**
- * Compares a chat title from the TUI with a recorded one. The picker truncates
- * long titles, so one being a prefix of the other counts as a match.
+ * Compares a chat title from the TUI with a recorded one.
+ *
+ * The picker truncates long titles to its column width, so there a prefix
+ * counts as a match. The footer has room for the whole title, so comparing it
+ * as a prefix would accept a different chat whose name merely starts the same
+ * way (`Fix tests` vs `Fix tests on macOS`) and replay its conversation.
  */
-function titleMatches(actual: string | null, expected: string): boolean {
+function titleMatches(actual: string | null, expected: string, mode: "footer" | "row" = "footer"): boolean {
   if (actual === null) return false;
   const a = actual.trim();
   const b = expected.trim();
   if (a === "" || b === "") return false;
+  if (mode === "footer") return a === b;
   return a === b || a.startsWith(b) || b.startsWith(a);
 }
 
@@ -307,31 +336,42 @@ function resumedMessages(screen: string): { role: "user" | "agent"; text: string
   return splitTranscriptMessages(extractTranscript(screen));
 }
 
+/** Why the wait for a usable TUI ended. */
+type Readiness = "ready" | "cancelled" | "timeout";
+
+/** Error text for a pane that never reached its composer. */
+const NOT_READY = "the Freebuff pane never showed its input prompt";
+
 /**
  * Polls until the TUI shows its prompt and the screen has stopped changing.
- * Returns false only when the wait was cancelled; a pane that never settles is
- * used anyway, since a best-effort turn beats failing.
+ *
+ * A timeout is a failure rather than a ready screen: the wait exists because
+ * keystrokes sent into a startup screen or a modal are silently dropped, so
+ * typing at the deadline would send the prompt nowhere.
  */
 async function waitForReady(
   pane: PaneSource,
   config: BridgeConfig,
   isCancelled: () => boolean,
-): Promise<boolean> {
+): Promise<Readiness> {
   const deadline = config.now() + config.startupTimeoutMs;
   let previous: string | null = null;
   let stable = 0;
   for (;;) {
+    // Cancellation wins over readiness: a prompt that arrives after the host
+    // gave up must not be typed into the pane.
+    if (isCancelled()) return "cancelled";
     const screen = await pane.capture();
+    if (isCancelled()) return "cancelled";
     const ready = isPromptVisible(normalizeScreen(screen));
     if (ready && previous !== null && screen === previous) {
       stable += 1;
-      if (stable >= READY_STABLE_CAPTURES) return true;
+      if (stable >= READY_STABLE_CAPTURES) return "ready";
     } else {
       stable = 0;
     }
     previous = screen;
-    if (config.now() >= deadline) return true;
-    if (isCancelled()) return false;
+    if (config.now() >= deadline) return "timeout";
     await config.sleep(config.pollIntervalMs);
   }
 }
@@ -339,4 +379,25 @@ async function waitForReady(
 /** The transcript text of a raw capture, joined for substring matching. */
 function transcriptText(raw: string): string {
   return extractTranscript(raw).join("\n");
+}
+
+/**
+ * Text reduced to the characters worth matching: whitespace runs (a wrapped row
+ * breaks the line where the source had a space) and decoration glyphs (the copy
+ * badge can sit mid-message once the TUI wraps it) both go.
+ */
+function collapse(text: string): string {
+  return text.replace(/[\s⎘•·△▽✕]/gu, "");
+}
+
+/** How many times `needle` appears in `haystack` (both already collapsed). */
+function occurrences(haystack: string, needle: string): number {
+  if (needle === "") return 0;
+  let count = 0;
+  let index = haystack.indexOf(needle);
+  while (index >= 0) {
+    count += 1;
+    index = haystack.indexOf(needle, index + needle.length);
+  }
+  return count;
 }

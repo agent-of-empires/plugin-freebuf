@@ -102,9 +102,19 @@ const HISTORY_ROW = /^[\s│┃]*\S[^│┃]*?\s+(\d+)\s+msgs?\s+(.+)$/;
 /** Control glyphs the picker draws after a row's title. */
 const HISTORY_ROW_TRAILER = /[\s[\]×█▄▀│┃]+$/u;
 
+/**
+ * The rest of the picker's furniture: its search field, its key hints and its
+ * boxed rows. The header alone is not enough, since an agent can quote the
+ * phrase `Select a chat to resume` in a message, and treating that as an open
+ * picker would blank out a real transcript.
+ */
+const HISTORY_UI = [/Search chats/i, /Enter open chat/i, /Esc cancel/i, HISTORY_ROW];
+
 /** True when the chat picker is open. */
 export function isChatHistoryScreen(raw: string): boolean {
-  return HISTORY_HEADER.test(stripAnsi(raw));
+  const screen = stripAnsi(raw);
+  if (!HISTORY_HEADER.test(screen)) return false;
+  return HISTORY_UI.some((marker) => marker.test(screen));
 }
 
 /** Titles listed by the open `/history` picker, most recent first. */
@@ -144,7 +154,20 @@ export function splitTranscriptMessages(lines: readonly string[]): { role: "user
     if (text !== "") messages.push({ role: current.role, text });
     current = null;
   };
-  for (const line of body) {
+  // True when the next visible row still belongs to the same user message: a
+  // prompt can contain blank paragraphs of its own, and its badge sits on the
+  // message's last row, below any of them.
+  const continuesUserMessage = (from: number): boolean => {
+    for (let i = from; i < body.length; i++) {
+      const row = body[i];
+      if (row.trim() === "") continue;
+      if (TIMESTAMP_ROW.test(row)) return false;
+      return /⎘\s*$/.test(row);
+    }
+    return false;
+  };
+  for (let i = 0; i < body.length; i++) {
+    const line = body[i];
     // A stamp opens one of the user's messages. It is the reliable signal: the
     // badge only marks the *last* row of a message that wrapped onto several
     // rows, so deciding per row would turn the earlier rows into agent text.
@@ -154,8 +177,12 @@ export function splitTranscriptMessages(lines: readonly string[]): { role: "user
       continue;
     }
     if (current !== null && current.role === "user") {
-      // The user's message ends at the blank row before the reply.
+      // A blank row ends the message unless the badge is still to come below.
       if (line.trim() === "") {
+        if (continuesUserMessage(i + 1)) {
+          current.rows.push("");
+          continue;
+        }
         flush();
         continue;
       }
@@ -246,9 +273,21 @@ function isDecorationRow(line: string): boolean {
  * at the first row that is real content: the transcript itself.
  */
 function chromeStart(lines: readonly string[]): number {
+  // Only a box holding the prompt glyph is the composer. A box in the
+  // transcript (a code block, a table, an answer) is content, and cutting the
+  // transcript at its top border would drop everything above it.
   let box = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (BOX_TOP.test(lines[i])) {
+    if (!BOX_TOP.test(lines[i])) continue;
+    let bottom = -1;
+    for (let j = i + 1; j < lines.length && j - i <= MAX_CHROME_ROWS; j++) {
+      if (BOX_BOTTOM.test(lines[j])) {
+        bottom = j;
+        break;
+      }
+    }
+    const inside = lines.slice(i, bottom > 0 ? bottom + 1 : lines.length);
+    if (inside.some((line) => PROMPT_ROW.test(line))) {
       box = i;
       break;
     }

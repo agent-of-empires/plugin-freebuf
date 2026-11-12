@@ -8,7 +8,7 @@ import { PassThrough, Readable, Writable } from "node:stream";
 import { ndJsonStream } from "@agentclientprotocol/sdk";
 import { createAdapter, type AdapterOptions } from "../src/adapter.ts";
 import { memorySessionStore } from "../src/store.ts";
-import { FakeClock, FakePane, fakePaneFactory } from "./fake.ts";
+import { composerScreen, FakeClock, FakePane, fakePaneFactory } from "./fake.ts";
 
 type Message = {
   jsonrpc?: string;
@@ -24,9 +24,9 @@ const DEFAULT_BRIDGE = {
   quiescenceMs: 300,
   echoTimeoutMs: 500,
   maxTurnMs: 20_000,
-  // These panes are scripted, not real TUI screens, so skip the readiness wait;
-  // the bridge suite covers it against a screen shaped like Freebuff's.
-  startupTimeoutMs: 0,
+  // Scripted screens carry a composer box, so readiness settles after
+  // READY_STABLE_CAPTURES polls rather than timing out.
+  startupTimeoutMs: 5_000,
 };
 
 /** Minimal in-test ACP client speaking raw NDJSON over two pipes. */
@@ -187,14 +187,15 @@ describe("ACP framing over stdio transport", () => {
     const pane = panes[0];
     pane.onSend = (keys) => {
       if (keys === "Enter") {
-        pane.screen = "freebuff ready\n> list the files";
+        pane.screen = composerScreen("freebuff ready", "> list the files");
       }
     };
+    // Output appears once the TUI has settled, so it is new text for the turn.
     clock.onAdvance = (time) => {
-      if (time >= 300 && time < 500) {
-        pane.screen = "freebuff ready\n> list the files\nfound 3 files";
-      } else if (time >= 500) {
-        pane.screen = "freebuff ready\n> list the files\nfound 3 files\n3 files listed";
+      if (time >= 600 && time < 900) {
+        pane.screen = composerScreen("freebuff ready", "> list the files", "found 3 files");
+      } else if (time >= 900) {
+        pane.screen = composerScreen("freebuff ready", "> list the files", "found 3 files", "3 files listed");
       }
     };
 
@@ -546,6 +547,127 @@ describe("session/load serialisation", () => {
 
     const typed = panes[0].sent.map((entry) => entry.keys).filter((keys) => keys.includes("prompt"));
     assert.deepEqual(typed, ["first prompt"], "the rejected prompt must not reach the composer");
+  });
+});
+
+describe("session/load guards", () => {
+  it("fails the load when the recorded chat is not the one that opened", async () => {
+    // The picker cannot find the recorded chat, so the pane is showing some
+    // other conversation: replaying it and rewriting the record would hand the
+    // host a transcript it never asked for.
+    const store = memorySessionStore({ "freebuff-acp-2-gone": { cwd: "/tmp/project", title: "a chat that is gone" } });
+    const { client, panes } = connectResumed({
+      screen: resumedScreen("something else", "something else", "other answer"),
+      store,
+      configure: (pane) => {
+        let pendingHistory = false;
+        pane.onSend = (keys) => {
+          if (keys === "/history") {
+            pendingHistory = true;
+            return;
+          }
+          if (keys !== "Enter" || !pendingHistory) return;
+          pendingHistory = false;
+          pane.screen = [
+            "                            Select a chat to resume",
+            "  ▍Search chats...",
+            "  ╭─────────────────────────────────────────────────────╮",
+            "  │ 5m ago    3 msgs   something else                   │",
+            "  ╰─────────────────────────────────────────────────────╯",
+            "  ↑↓ navigate · → / Enter open chat · Esc cancel",
+          ].join("\n");
+        };
+      },
+    });
+    await initialize(client);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "session/load",
+      params: { sessionId: "freebuff-acp-2-gone", cwd: "/tmp/project", mcpServers: [] },
+    });
+    const response = await client.next((m) => m.id === 5);
+
+    assert.equal((response.error as { code: number }).code, -32000);
+    assert.match((response.error as { message: string }).message, /is not in this directory's history/);
+    assert.equal(panes[0].stopped, true, "the pane was left running on the wrong chat");
+  });
+
+  it("refuses to reopen a recorded conversation in another directory", async () => {
+    // The record's title belongs to the directory it was started in. Opening
+    // elsewhere keeps that title while showing a different chat, and the store
+    // write would rebind the session to the new directory.
+    const store = memorySessionStore({ "freebuff-acp-3-cwd": { cwd: "/tmp/first", title: "Fix tests" } });
+    const { client, panes } = connectResumed({ screen: resumedScreen("Fix tests", "Fix tests", "ok"), store });
+    await initialize(client);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "session/load",
+      params: { sessionId: "freebuff-acp-3-cwd", cwd: "/tmp/second", mcpServers: [] },
+    });
+    const response = await client.next((m) => m.id === 5);
+
+    assert.equal((response.error as { code: number }).code, -32000);
+    assert.match((response.error as { message: string }).message, /recorded in '\/tmp\/first'/);
+    assert.equal(panes.length, 0, "a pane was created for a rejected load");
+  });
+
+  it("refuses a load while the session is running a turn", async () => {
+    // A load replaces the entry with a new pane under the same tmux name, and
+    // the resume path kills that name first: the running turn would keep
+    // sending keys into the replacement.
+    const title = "Remember the word ORANGE. Reply with just: STORED";
+    const store = memorySessionStore({ "freebuff-acp-4-busy": { cwd: "/tmp/project", title } });
+    const { client, panes } = connectResumed({
+      screen: resumedScreen(title, title, "STORED"),
+      store,
+      configure: (pane) => {
+        // Once the prompt is typed the turn stalls on a capture that never
+        // returns, so it is still in flight in real time when the load arrives.
+        let stalled = false;
+        pane.onSend = (keys) => {
+          if (keys === "wake up") stalled = true;
+        };
+        const originalCapture = pane.capture.bind(pane);
+        pane.capture = () =>
+          stalled ? new Promise<string>(() => {}) : originalCapture();
+      },
+    });
+    await initialize(client);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "session/load",
+      params: { sessionId: "freebuff-acp-4-busy", cwd: "/tmp/project", mcpServers: [] },
+    });
+    await client.next((m) => m.id === 5);
+    client.send({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "session/prompt",
+      params: { sessionId: "freebuff-acp-4-busy", prompt: [{ type: "text", text: "wake up" }] },
+    });
+    // Wait for that turn to be in flight on the pane, then try to load again.
+    for (let i = 0; i < 200 && !panes[0].sent.some((entry) => entry.keys === "wake up"); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.ok(panes[0].sent.some((entry) => entry.keys === "wake up"), "the turn never started");
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "session/load",
+      params: { sessionId: "freebuff-acp-4-busy", cwd: "/tmp/project", mcpServers: [] },
+    });
+    const response = await client.next((m) => m.id === 7);
+
+    assert.equal((response.error as { code: number }).code, -32000);
+    assert.match((response.error as { message: string }).message, /busy/);
+    assert.equal(panes.length, 1, "a second pane was created for a rejected load");
   });
 });
 

@@ -366,6 +366,52 @@ describe("chat identity and resume helpers", () => {
     assert.deepEqual(chatHistoryRows(picker), ["remember the word BANANA", "remember the word PLUM"]);
   });
 
+  it("does not mistake a quoted picker phrase for an open picker", () => {
+    // An agent can mention the picker in a message. Treating that as a modal
+    // would blank out the whole transcript until the phrase scrolled away.
+    const screen = [
+      "   [02:42 PM]",
+      "   where does `Select a chat to resume` come from? ⎘",
+      "",
+      "  It is the /history picker's header.",
+    ].join("\n");
+    assert.equal(isChatHistoryScreen(screen), false);
+    assert.ok(extractTranscript(screen).join("\n").includes("/history picker"));
+  });
+
+  it("keeps a blank paragraph inside a restored user message", () => {
+    // The badge sits on the message's last row, below the blank paragraph, so
+    // the blank row is part of the message rather than the gap before a reply.
+    const lines = [
+      "   [02:42 PM]",
+      "   first paragraph",
+      "",
+      "   second paragraph ⎘",
+      "",
+      "  the answer",
+    ];
+    assert.deepEqual(splitTranscriptMessages(lines), [
+      { role: "user", text: "first paragraph\n\nsecond paragraph" },
+      { role: "agent", text: "the answer" },
+    ]);
+  });
+
+  it("keeps a boxed answer that is not the input box", () => {
+    // Only a box holding the prompt glyph is chrome. Cutting at any box would
+    // drop the transcript down to a boxed result drawn by the agent.
+    const screen = [
+      "   [02:42 PM]",
+      "   sum the column ⎘",
+      "",
+      "  ╭───────────────╮",
+      "  │ total: 42     │",
+      "  ╰───────────────╯",
+    ].join("\n");
+    const transcript = extractTranscript(screen).join("\n");
+    assert.ok(transcript.includes("total: 42"), `lost the boxed answer: ${JSON.stringify(transcript)}`);
+    assert.ok(transcript.includes("sum the column"));
+  });
+
   it("treats an open chat picker as having no transcript", () => {
     const picker = [
       "                              Select a chat to resume",

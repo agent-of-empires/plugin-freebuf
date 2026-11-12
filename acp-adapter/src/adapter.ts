@@ -12,6 +12,7 @@ import {
   systemClock,
   type BridgeConfig,
   type TurnNotice,
+  type TurnResult,
 } from "./bridge.ts";
 import { chatTitle } from "./screen.ts";
 import type { PaneFactory, SessionPane } from "./pane.ts";
@@ -104,6 +105,22 @@ export function createAdapter(options: AdapterOptions): AgentApp {
     })
     .onRequest(methods.agent.session.load, async ({ params, client }) => {
       const known = store.get(params.sessionId);
+      // A conversation lives in the directory it was started in. Reopening it
+      // elsewhere keeps the recorded title while opening a different chat, and a
+      // same-titled chat in the new directory would pass the title comparison.
+      if (known !== undefined && known.cwd !== params.cwd) {
+        throw new RequestError(
+          -32000,
+          `session '${params.sessionId}' was recorded in '${known.cwd}' and cannot be reopened in '${params.cwd}'`,
+        );
+      }
+      // A load replaces the session's entry with a new pane under the same tmux
+      // name, which the resume path kills first: a turn still running on the old
+      // state would send its keys into the replacement.
+      const previous = sessions.get(params.sessionId);
+      if (previous?.prompting === true || previous?.resuming !== undefined) {
+        throw new RequestError(-32000, `session '${params.sessionId}' is busy`);
+      }
       let pane: SessionPane;
       try {
         pane = await options.createPane({ sessionId: params.sessionId, cwd: params.cwd, resume: true });
@@ -119,6 +136,12 @@ export function createAdapter(options: AdapterOptions): AgentApp {
       // on the session state so a prompt that arrives meanwhile waits for it.
       const resuming = (async () => {
         const resumed = await resumeChat({ pane, config, title: known?.title ?? null });
+        // A chat that could not be restored is some other conversation: binding
+        // it to this session would replay the wrong transcript and rename the
+        // record to a title the host never asked for.
+        if (!resumed.restored) {
+          throw new Error(`the requested chat '${known?.title ?? ""}' is not in this directory's history`);
+        }
         store.set(params.sessionId, { cwd: params.cwd, title: resumed.title ?? known?.title ?? null });
         for (const message of resumed.messages) {
           await client.notify(methods.client.session.update, {
@@ -168,11 +191,13 @@ export function createAdapter(options: AdapterOptions): AgentApp {
         if (session.resuming !== undefined) {
           await session.resuming;
         }
-        const result = await runTurn({
-          pane: session.pane,
-          promptText: promptTextFromBlocks(params.prompt),
-          config,
-          events: {
+        let result: TurnResult;
+        try {
+          result = await runTurn({
+            pane: session.pane,
+            promptText: promptTextFromBlocks(params.prompt),
+            config,
+            events: {
             onChunk: (text) =>
               client.notify(methods.client.session.update, {
                 sessionId: params.sessionId,
@@ -183,9 +208,13 @@ export function createAdapter(options: AdapterOptions): AgentApp {
                 sessionId: params.sessionId,
                 update: noticeUpdate(notice),
               }),
-            isCancelled: () => session.cancelled || signal.aborted,
-          },
-        });
+              isCancelled: () => session.cancelled || signal.aborted,
+            },
+          });
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          throw new RequestError(-32000, `the Freebuff pane could not take the prompt: ${detail}`);
+        }
         // The chat title tracks the first prompt, so it changes during a turn:
         // record it once the turn is over so a later resume can find this chat.
         await recordSession(params.sessionId, session);

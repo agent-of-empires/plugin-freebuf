@@ -106,7 +106,10 @@ export function watchdogCommand(
 ): string {
   const tmux = shellQuote(options.tmuxBin ?? "tmux");
   const watch = `while kill -0 ${options.parentPid} 2>/dev/null; do sleep 2; done; ${tmux} kill-session -t ${shellQuote(options.session)} 2>/dev/null`;
-  return `{ ${watch}; } & exec ${inner}`;
+  // Through a shell, not straight after `exec`: a configured command may carry
+  // an assignment prefix (`MODE=dev freebuff ...`), which `exec` would read as
+  // the name of the program instead of the environment it sets.
+  return `{ ${watch}; } & exec sh -c ${shellQuote(inner)}`;
 }
 
 function defaultExec(tmuxBin: string): TmuxExec {

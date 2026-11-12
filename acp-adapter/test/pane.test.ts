@@ -40,9 +40,18 @@ describe("watchdogCommand", () => {
       parentPid: 4242,
     });
     assert.match(command, /while kill -0 4242 2>\/dev\/null; do sleep 2; done; 'tmux' kill-session -t 'freebuff-acp-1-abc'/);
-    assert.ok(command.endsWith("} & exec freebuff --cwd '/tmp/x'"));
+    // Through a shell: a configured command may start with an assignment prefix.
+    assert.ok(command.endsWith(`} & exec sh -c ${shellQuote("freebuff --cwd '/tmp/x'")}`));
     // The TUI must stay in the foreground: it needs the pty as its terminal.
     assert.ok(!command.includes("freebuff --cwd '/tmp/x' &"));
+  });
+
+  it("runs an env-prefixed command through a shell so the assignment applies", () => {
+    const inner = "MODE=dev freebuff --cwd '/tmp/x'";
+    const command = watchdogCommand(inner, { session: "s", parentPid: 1 });
+    // `exec MODE=dev freebuff ...` is not a command: the prefix needs a shell.
+    assert.ok(command.endsWith(`} & exec sh -c ${shellQuote(inner)}`));
+    assert.ok(!command.includes(`exec ${inner}`));
   });
 
   it("uses the configured tmux binary", () => {
