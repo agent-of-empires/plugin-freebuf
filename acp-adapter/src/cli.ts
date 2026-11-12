@@ -22,7 +22,9 @@ export function main(): void {
 
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
     process.on(signal, () => {
-      stopAllPanes();
+      // Synchronously: `process.exit` immediately after an async kill would
+      // win the race and leave the tmux pane behind.
+      stopAllPanes(true);
       process.exit(130);
     });
   }
