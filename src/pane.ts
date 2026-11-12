@@ -87,24 +87,64 @@ const PROMPT_LINE = /^[ \t]*(?:│[ \t]*)?(?:❯|▍)/;
 /** The top border of that input box, which is the prompt row's frame. */
 const INPUT_BOX_TOP = /^[ \t]*╭─+╮[ \t]*$/;
 
-/** Rows that may sit between the status line and the prompt: borders and blanks. */
-const CHROME_ROW = /^[ \t]*[│╭╮╰╯─]*[ \t]*$/;
+/**
+ * The panel Freebuff draws over the composer instead of the input box: a
+ * message typed while the turn is still running is held until it ends. The
+ * composer is gone, so the live-turn status line sits above this panel.
+ */
+const QUEUED_MESSAGE = /^[ \t]*│.*Your message is saved.*│[ \t]*$/;
+
+/** The square top border of that panel. */
+const PANEL_TOP = /^[ \t]*┌─+┐[ \t]*$/;
+
+/**
+ * Rows that may sit between the status line and the composer: borders and
+ * blanks, in either the rounded frame of the input box or the square frame of
+ * the panels Freebuff draws in its place.
+ */
+const CHROME_ROW = /^[ \t]*[│╭╮╰╯─┌┐└┘]*[ \t]*$/;
 
 /** How far above the prompt the status line may sit; the input box is a few rows tall. */
 const MAX_CHROME_ROWS = 12;
 
+/** How far above the panel's text its top border may sit. */
+const PANEL_TOP_ROWS = 2;
+
 /**
- * True when a live-turn status line sits in the chrome above the input prompt.
- * The phrase also shows up in the transcript (agent prose, or the prompt quoted
- * back), so it only counts when nothing but blank and border rows separate it
- * from the prompt -- not the explanation lines a quoted status is followed by.
+ * True when this row is the queued-message panel's own text, with the panel's
+ * top border just above it.
+ *
+ * The phrase alone is not enough: a session can quote it in the transcript, and
+ * an unchecked match there would anchor a status line that is nowhere near the
+ * composer.
+ */
+function isQueuedPanel(lines: readonly string[], index: number): boolean {
+  if (!QUEUED_MESSAGE.test(lines[index])) return false;
+  for (let above = index - 1; above >= 0 && above >= index - PANEL_TOP_ROWS; above -= 1) {
+    if (PANEL_TOP.test(lines[above])) return true;
+  }
+  return false;
+}
+
+/**
+ * True when a live-turn status line sits in the chrome above the composer.
+ *
+ * Read from the composer upward: only blank and border rows may separate it
+ * from the status line, so the phrase quoted in the transcript -- agent prose,
+ * or the prompt quoted back -- never counts, and a status line far up the
+ * scrollback is out of reach. The composer is either the prompt row or the
+ * panel that replaces it while a message is queued. Reading up from the
+ * composer rather than down from the status line reaches the same rows, because
+ * each side stops at the first row that is neither status nor chrome.
  */
 function statusAbovePrompt(lines: readonly string[]): boolean {
-  for (let i = 0; i < lines.length; i += 1) {
-    if (!STATUS_LINE.test(lines[i])) continue;
-    for (let j = i + 1; j < lines.length && j <= i + MAX_CHROME_ROWS; j += 1) {
-      if (PROMPT_LINE.test(lines[j]) || INPUT_BOX_TOP.test(lines[j])) return true;
-      if (!CHROME_ROW.test(lines[j])) break;
+  for (let anchor = 0; anchor < lines.length; anchor += 1) {
+    const line = lines[anchor];
+    const composer = PROMPT_LINE.test(line) || INPUT_BOX_TOP.test(line) || isQueuedPanel(lines, anchor);
+    if (!composer) continue;
+    for (let up = anchor - 1; up >= 0 && up >= anchor - MAX_CHROME_ROWS; up -= 1) {
+      if (STATUS_LINE.test(lines[up])) return true;
+      if (!CHROME_ROW.test(lines[up])) break;
     }
   }
   return false;
