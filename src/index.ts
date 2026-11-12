@@ -8,11 +8,12 @@
 // it, never answer), and one without an id is a notification (ignore).
 //
 // Every tick the worker reads each freebuff session's own screen, classifies it
-// the way the host classifies its built-in agents (blocking dialog -> waiting,
-// working status line -> running, otherwise parked), and raises or lowers the
-// host's attention flag from that. The flag is what the attention order and
-// jump-to-next-attention read, so a session blocked on a question surfaces
-// exactly like a native agent's Waiting row -- without a text column.
+// the way the host classifies its built-in agents (blocking question dialog ->
+// waiting, error dialog -> error, working status line -> running, otherwise
+// parked), and raises or lowers the host's attention flag from that. The flag is
+// what the attention order and jump-to-next-attention read, so a session blocked
+// on a question surfaces exactly like a native agent's Waiting row -- without a
+// text column.
 
 import * as readline from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -229,7 +230,9 @@ export async function heartbeat(options: HeartbeatOptions = {}): Promise<void> {
           note(`${id}: ${state}`);
         }
         try {
-          if (state === "waiting") writeUrgent(dir, now + FLAG_TTL_MS);
+          // Both blocking states need the user: a question wants an answer, an
+          // error dialog wants a dismissal. Anything else is not blocked on us.
+          if (state === "waiting" || state === "error") writeUrgent(dir, now + FLAG_TTL_MS);
           else clearUrgent(dir);
           // The host reads this report as the row's own status.
           writeReport(

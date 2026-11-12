@@ -14,13 +14,19 @@ classifies its built-in agents:
 
 | Pane | Class | Flag |
 |---|---|---|
-| `Some questions for you`, `Close ✕`, `Do you want to proceed`, `(y/n)` | waiting | raised |
-| `working...` or `thinking...` with `■ Esc` | running | lowered |
+| question dialog: caption `Some questions for you`, `Do you want to proceed` | waiting | raised |
+| error dialog: caption says error/failed | error | raised |
+| `working...` or `thinking...` with `■ Esc` above the composer | running | lowered |
 | the input prompt and its footer, nothing else | idle | lowered |
 | capture failed (no pane, CLI missing, timeout) | unknown | left alone, so it expires |
 
 A blocking dialog is checked first, because Freebuff draws it over a turn that
-is still open. The flag is the file the host reads for any session,
+is still open. It is found structurally, and only its *caption* decides: a
+boxed panel with `Close ✕` under its captioned border, with no composer drawn
+below it (a dialog replaces the composer; output the session printed does not).
+So a session that merely talks about, quotes, or prints a dialog stays
+`running`/`idle` -- text is never read for a block -- and a question is never
+reported as an error. The flag is the file the host reads for any session,
 plugin-declared or not: `/tmp/aoe-hooks-<euid>/<session id>/attention.json` with
 `{"urgent": true, "urgent_expires_at": <epoch secs>}`, `0600` in a `0700`
 directory, refreshed each tick while the dialog is up and decaying two minutes

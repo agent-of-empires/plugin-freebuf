@@ -38,6 +38,15 @@ const IDLE_PANE = [
   " ← for history · ? for help",
 ].join("\n");
 
+/** Freebuff's failure surface, drawn in place of the composer like the question panel. */
+const ERROR_PANE = [
+  "     Row badge becomes one status icon/glyph tinted by workflow state, and the",
+  "╭──────────────────────────────────── Error ─────────────────────────────────────╮",
+  "│                                                                        Close ✕ │",
+  "│ The agent step failed: request timed out.                                      │",
+  "╰───────────────────────────────────────────────────────────────────────────────╯",
+].join("\n");
+
 describe("pane classification", () => {
   it("reads a blocking question modal as waiting", () => {
     expect(classifyPane(WAITING_PANE)).toBe("waiting");
@@ -59,12 +68,129 @@ describe("pane classification", () => {
     ).toBe("running");
   });
 
+  it("reads a working pane whose composer holds a queued message as running", () => {
+    // Captured live: typing while the turn runs replaces the composer with this
+    // panel, so the status line anchors on the panel instead of the prompt box.
+    expect(
+      classifyPane(
+        [
+          " working...              55m 23s   ■ Esc",
+          "┌───────────────────────────────────────┐",
+          "│ Your message is saved and will send   │",
+          "│ after the current turn.               │",
+          "│ Enter: change       Esc: back to draft│",
+          "│ model                                 │",
+          "└───────────────────────────────────────┘",
+          " DeepSeek V4.1 Flash Slow · ~/code/x · /model to change",
+          " ← for history · ? for help",
+        ].join("\n"),
+      ),
+    ).toBe("running");
+  });
+
   it("reads a parked prompt with no status line as idle", () => {
     expect(classifyPane(IDLE_PANE)).toBe("idle");
   });
 
   it("prefers a dialog over the working line it was drawn across", () => {
     expect(classifyPane(`${RUNNING_PANE}\n${WAITING_PANE}`)).toBe("waiting");
+  });
+
+  it("reads an error dialog as error, not as a question", () => {
+    expect(classifyPane(ERROR_PANE)).toBe("error");
+  });
+
+  it("never takes a confirmation phrase in the transcript for a block", () => {
+    // Only a dialog's caption counts: prose, a quoted prompt or tool output can
+    // say "(y/n)" or "Do you want to proceed" without anything being asked.
+    const asking = [
+      "  To continue, the tool would have prompted (y/n) -- it did not, so it just ran.",
+      "  The harness asked \"Do you want to proceed?\" and the answer was yes.",
+      "",
+      " working...                                                                   2m 04s   ■ Esc",
+      "╭───────────────────────────────────────────────────────────────────────────────────╮",
+      "│  ▍Add to the current task (/ for commands)                                        │",
+      "╰───────────────────────────────────────────────────────────────────────────────────╯",
+      " ← for history · ? for help",
+    ].join("\n");
+    expect(classifyPane(asking)).toBe("running");
+    expect(classifyPane(asking.replace(" working...                                                                   2m 04s   ■ Esc\n", ""))).toBe("idle");
+  });
+
+  it("ignores a question dialog the transcript merely quotes", () => {
+    // The transcript scrolls away above the composer; only a dialog drawn over
+    // the bottom of the pane blocks the session. A working session whose own
+    // output mentions the panel is still working, and must not be flagged.
+    const quoting = [
+      '  The modal reads "Some questions for you" with a Close ✕ row, so the',
+      "  classifier can match it. Then the worker reports waiting for it.",
+      "",
+      " working...                                                                   9m 21s   ■ Esc",
+      "╭───────────────────────────────────────────────────────────────────────────────────╮",
+      "│                                                                                   │",
+      "│  ▍Add to the current task (/ for commands)                                        │",
+      "│                                                                                   │",
+      "╰───────────────────────────────────────────────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(quoting)).toBe("running");
+
+    // Same for a parked composer: prose about the dialog is not a dialog.
+    expect(classifyPane(`${quoting}\n ← for history · ? for help`)).toBe("running");
+    const parked = [
+      '  The modal reads "Some questions for you" with a Close ✕ row.',
+      "╭───────────────────────────────────────────────────────────────────────────────────╮",
+      "│  ▍Add to the current task (/ for commands)                                        │",
+      "╰───────────────────────────────────────────────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(parked)).toBe("idle");
+  });
+
+  it("ignores a question quoted inside a transcript panel", () => {
+    // Tool output draws boxes too: a captioned panel above the composer is
+    // still transcript, so it needs the modal's close row to count.
+    const panel = [
+      "  ╭──────────────────────────── Some questions for you ────────────────────────────╮",
+      "  │ the modal, as captured by an earlier run                                        │",
+      "  ╰────────────────────────────────────────────────────────────────────────────────╯",
+      " working...                                                                   1m 31s   ■ Esc",
+      " ╭─────────────────────────────────────────────────────────────────────────────╮",
+      " │  ▍Add to the current task (/ for commands)                                   │",
+      " ╰─────────────────────────────────────────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(panel)).toBe("running");
+  });
+
+  it("reads a tall question dialog as waiting", () => {
+    // The caption sits on the box's top border with Close under it, so a dialog
+    // taller than the pane's footer still counts, however many rows it holds.
+    const tall = [
+      "╭──────────────────────────────── Some questions for you ────────────────────────────────╮",
+      "│                                                                                 Close ✕ │",
+      ...Array.from({ length: 24 }, (_, i) => `│ ▼ question ${i + 1}${" ".repeat(84)}│`),
+      "╰─────────────────────────────────────────────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(tall)).toBe("waiting");
+  });
+
+  it("ignores a dialog-shaped panel the session printed above the composer", () => {
+    // The same box, drawn as output: the composer under it is what gives it
+    // away, because a real dialog replaces the composer.
+    const printed = [
+      "  The panel reads:",
+      "╭──────────────────────────────── Some questions for you ──────────────────╮",
+      "│                                                                Close ✕ │",
+      "╰─────────────────────────────────────────────────────────────────────────╯",
+      " working...                                                        1m 31s   ■ Esc",
+      "╭─────────────────────────────────────────────────────────────────────────╮",
+      "│  ▍Add to the current task (/ for commands)                              │",
+      "╰─────────────────────────────────────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(printed)).toBe("running");
+
+    // Parked instead of working, the same output still is not a dialog.
+    expect(classifyPane(printed.replace(" working...                                                        1m 31s   ■ Esc\n", ""))).toBe(
+      "idle",
+    );
   });
 
   it("ignores status text quoted in an idle transcript", () => {

@@ -122,6 +122,24 @@ describe("attention heartbeat", () => {
     expect(report(hookBase, "sess-other")).toBeNull();
   });
 
+  it("reports an error dialog as error, and asks for attention on it", async () => {
+    // A failure surfaces as the row's own status, not as a question: the host
+    // maps `error` to its Error row, while waiting would claim it is asking.
+    const ERROR = [
+      "╭──────────────────── Error ────────────────────╮",
+      "│                                       Close ✕ │",
+      "│ The agent step failed: request timed out.     │",
+      "╰───────────────────────────────────────────────╯",
+    ].join("\n");
+    const { hookBase, now } = await runTick([{ id: "sess-failed", tool: "freebuff" }], { "sess-failed": ERROR });
+
+    expect(flag(hookBase, "sess-failed")).toEqual({
+      urgent: true,
+      urgent_expires_at: Math.floor((now + FLAG_TTL_MS) / 1000),
+    });
+    expect(report(hookBase, "sess-failed")).toMatchObject({ schema_version: 1, status: "error", revision: 0 });
+  });
+
   it("lowers a raised flag once the dialog is gone", async () => {
     const hookBase = tempDir("aoe-hooks-");
     const dir = path.join(hookBase, "sess-asking");

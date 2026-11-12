@@ -60,19 +60,37 @@ export const CAPTURE_LINES = 60;
 /** How long one capture may take before the session counts as unknown. */
 const CAPTURE_TIMEOUT_MS = 4_000;
 
-export type PaneState = "waiting" | "running" | "idle";
+export type PaneState = "waiting" | "running" | "idle" | "error";
 
 /**
- * Freebuff's blocking UI: the "Some questions for you" modal (with its Close
- * affordance) and the inline confirmation prompts. Checked before the working
+ * Rows a dialog's caption may sit above its close row. The caption *is* the
+ * box's top border, and Freebuff puts `Close ✕` on the row under it, so this
+ * holds however tall the dialog gets.
+ */
+const DIALOG_CAPTION_ROWS = 2;
+
+/**
+ * The captioned top border of a boxed dialog, `╭─── Some questions for you ───╮`.
+ * Freebuff titles its ask-user panel this way, and gives other modals their own
+ * caption, so the caption is what says which dialog is up.
+ */
+const DIALOG_TOP = /^[ \t]*╭─+[ \t]+(.*?)[ \t]+─+╮[ \t]*$/;
+
+/** A row inside a boxed dialog carrying the modal's close affordance. */
+const DIALOG_CLOSE_ROW = /^[ \t]*│.*Close ✕.*│[ \t]*$/;
+
+/**
+ * Captions of the dialogs that block on the user. Checked before the working
  * line, because a dialog is drawn while the turn is still open.
  */
-const WAITING: RegExp[] = [
-  /Some questions for you/,
-  /^\s*Close ✕\s*$/m,
-  /Do you want to (?:proceed|allow|continue)/i,
-  /\(y\/n\)/i,
-];
+const WAITING_DIALOG = /Some questions for you|Do you want to (?:proceed|allow|continue)/i;
+
+/**
+ * A caption that says the dialog reports a failure rather than asking
+ * anything. Conservative on purpose: only the caption counts, because the body
+ * of a question is free text and may well mention an error.
+ */
+const ERROR_DIALOG = /\b(?:error|failed|failure)\b/i;
 
 /** Freebuff's live turn status line. */
 const STATUS_LINE = /^[ \t]*(?:working|thinking)\.\.\.[^\n]*■[ \t]*Esc\b[ \t]*$/;
@@ -87,23 +105,87 @@ const PROMPT_LINE = /^[ \t]*(?:│[ \t]*)?(?:❯|▍)/;
 /** The top border of that input box, which is the prompt row's frame. */
 const INPUT_BOX_TOP = /^[ \t]*╭─+╮[ \t]*$/;
 
-/** Rows that may sit between the status line and the prompt: borders and blanks. */
-const CHROME_ROW = /^[ \t]*[│╭╮╰╯─]*[ \t]*$/;
+/**
+ * The panel Freebuff draws over the composer instead of the input box: a
+ * message typed while the turn is still running is held until it ends. The
+ * composer is gone, so the live-turn status line sits above this panel.
+ */
+const QUEUED_MESSAGE = /Your message is saved/;
+
+/**
+ * Rows that may sit between the status line and the composer: borders and
+ * blanks, in either the rounded frame of the input box or the square frame of
+ * the panels Freebuff draws in its place.
+ */
+const CHROME_ROW = /^[ \t]*[│╭╮╰╯─┌┐└┘]*[ \t]*$/;
 
 /** How far above the prompt the status line may sit; the input box is a few rows tall. */
 const MAX_CHROME_ROWS = 12;
 
 /**
- * True when a live-turn status line sits in the chrome above the input prompt.
- * The phrase also shows up in the transcript (agent prose, or the prompt quoted
- * back), so it only counts when nothing but blank and border rows separate it
- * from the prompt -- not the explanation lines a quoted status is followed by.
+ * The frame a dialog replaces: the composer's box, or the panel drawn over it
+ * when a message is queued mid-turn. Only these full-width frames count -- a
+ * marker character can appear inside a dialog's own body.
+ */
+function isComposerFrame(row: string): boolean {
+  return INPUT_BOX_TOP.test(row) || QUEUED_MESSAGE.test(row);
+}
+
+/**
+ * The caption of the dialog drawn at the bottom of the pane, or null when the
+ * bottom of the pane is the composer.
+ *
+ * Read from the `Close ✕` row upward to the captioned border just above it, so
+ * the dialog's height does not matter. The dialog replaces the composer, and
+ * that is the rule that separates it from the transcript: a boxed panel with a
+ * composer drawn *below* it is output the session printed or quoted, not a
+ * dialog waiting on the user.
+ */
+function bottomDialog(lines: readonly string[]): string | null {
+  for (let close = lines.length - 1; close >= 0; close -= 1) {
+    if (!DIALOG_CLOSE_ROW.test(lines[close])) continue;
+    // Bottom-most close row wins, and a composer under it means it was output.
+    if (lines.slice(close + 1).some(isComposerFrame)) return null;
+    for (let top = close - 1; top >= Math.max(0, close - DIALOG_CAPTION_ROWS); top -= 1) {
+      const caption = DIALOG_TOP.exec(lines[top]);
+      if (caption !== null) return caption[1];
+    }
+    return null; // a close row with no caption over it is not a dialog we know
+  }
+  return null;
+}
+
+/**
+ * What the dialog at the bottom of the pane is blocking on, or null when there
+ * is no dialog there.
+ *
+ * A dialog's caption decides; nothing else in the pane is read for a block, so
+ * no amount of talking about one -- in prose, in a quoted prompt, in tool
+ * output -- can claim the session is waiting on the user.
+ */
+function blockedOn(lines: readonly string[]): PaneState | null {
+  const caption = bottomDialog(lines);
+  if (caption === null) return null;
+  if (WAITING_DIALOG.test(caption)) return "waiting";
+  if (ERROR_DIALOG.test(caption)) return "error";
+  return null; // an unrecognised dialog is not a verdict; the composer decides
+}
+
+/**
+ * True when a live-turn status line sits in the chrome above the composer.
+ *
+ * Read from the composer upward: only blank and border rows may separate it
+ * from the status line, so the phrase quoted in the transcript -- agent prose,
+ * or the prompt quoted back -- never counts, and a status line far up the
+ * scrollback is out of reach.
  */
 function statusAbovePrompt(lines: readonly string[]): boolean {
-  for (let i = 0; i < lines.length; i += 1) {
-    if (!STATUS_LINE.test(lines[i])) continue;
-    for (let j = i + 1; j < lines.length && j <= i + MAX_CHROME_ROWS; j += 1) {
-      if (PROMPT_LINE.test(lines[j]) || INPUT_BOX_TOP.test(lines[j])) return true;
+  for (let anchor = 0; anchor < lines.length; anchor += 1) {
+    const line = lines[anchor];
+    const composer = PROMPT_LINE.test(line) || INPUT_BOX_TOP.test(line) || QUEUED_MESSAGE.test(line);
+    if (!composer) continue;
+    for (let j = anchor - 1; j >= 0 && j >= anchor - MAX_CHROME_ROWS; j -= 1) {
+      if (STATUS_LINE.test(lines[j])) return true;
       if (!CHROME_ROW.test(lines[j])) break;
     }
   }
@@ -117,9 +199,10 @@ export function stripAnsi(text: string): string {
 
 /** Classify a captured pane. Unrecognised content is the idle prompt. */
 export function classifyPane(text: string): PaneState {
-  const clean = stripAnsi(text);
-  if (WAITING.some((rule) => rule.test(clean))) return "waiting";
-  if (statusAbovePrompt(clean.split(/\r?\n/))) return "running";
+  const lines = stripAnsi(text).split(/\r?\n/);
+  const blocked = blockedOn(lines);
+  if (blocked !== null) return blocked;
+  if (statusAbovePrompt(lines)) return "running";
   return "idle";
 }
 
