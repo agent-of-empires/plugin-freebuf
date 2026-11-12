@@ -1,7 +1,24 @@
 // Test doubles: a scripted pane (no tmux, no freebuff) and a fake clock so the
 // bridge's polling/quiescence logic runs deterministically without timers.
 
-import type { PaneFactory, SendOptions, SessionPane } from "../src/pane.ts";
+import type { PaneFactory, PaneRequest, SendOptions, SessionPane } from "../src/pane.ts";
+
+/**
+ * A minimal stand-in for Freebuff's settled screen: a transcript row above the
+ * input box, then the housekeeping rows the bridge must not stream (status
+ * line, footer). Shaped like the real thing so the chrome cut is exercised.
+ */
+export const READY_SCREEN = [
+  "  freebuff",
+  "",
+  "╭──────────────────────────────╮",
+  "│                              │",
+  "│  ▍Enter a coding task        │",
+  "│                              │",
+  "╰──────────────────────────────╯",
+  " DeepSeek V4.1 Flash Slow · /tmp · Chat: New chat",
+  " ← for history · ? for help",
+].join("\n");
 
 /** Deterministic clock: `sleep` advances virtual time instead of waiting. */
 export class FakeClock {
@@ -29,9 +46,9 @@ export class FakePane implements SessionPane {
   /** Hook invoked on every `send`, used to model the TUI echoing a prompt. */
   onSend?: (keys: string, options?: SendOptions) => void;
   /** Whatever the factory was called with, for assertions. */
-  readonly meta: { sessionId: string; cwd: string };
+  readonly meta: PaneRequest;
 
-  constructor(meta: { sessionId: string; cwd: string }, screen = "") {
+  constructor(meta: PaneRequest, screen = "") {
     this.meta = meta;
     this.screen = screen;
   }
@@ -53,8 +70,15 @@ export class FakePane implements SessionPane {
   }
 }
 
-/** Pane factory that records every pane it created. */
-export function fakePaneFactory(initialScreen = "freebuff ready"): {
+/**
+ * Pane factory that records every pane it created. `configure` runs on each new
+ * pane before it is handed back, so behaviour can be scripted without having to
+ * grab the pane afterwards.
+ */
+export function fakePaneFactory(
+  initialScreen = READY_SCREEN,
+  configure?: (pane: FakePane) => void,
+): {
   factory: PaneFactory;
   panes: FakePane[];
 } {
@@ -62,6 +86,7 @@ export function fakePaneFactory(initialScreen = "freebuff ready"): {
   const factory: PaneFactory = async (request) => {
     const pane = new FakePane(request, initialScreen);
     panes.push(pane);
+    configure?.(pane);
     return pane;
   };
   return { factory, panes };

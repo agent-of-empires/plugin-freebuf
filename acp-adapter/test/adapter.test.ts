@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { PassThrough, Readable, Writable } from "node:stream";
 import { ndJsonStream } from "@agentclientprotocol/sdk";
 import { createAdapter, type AdapterOptions } from "../src/adapter.ts";
+import { memorySessionStore } from "../src/store.ts";
 import { FakeClock, FakePane, fakePaneFactory } from "./fake.ts";
 
 type Message = {
@@ -23,6 +24,9 @@ const DEFAULT_BRIDGE = {
   quiescenceMs: 300,
   echoTimeoutMs: 500,
   maxTurnMs: 20_000,
+  // These panes are scripted, not real TUI screens, so skip the readiness wait;
+  // the bridge suite covers it against a screen shaped like Freebuff's.
+  startupTimeoutMs: 0,
 };
 
 /** Minimal in-test ACP client speaking raw NDJSON over two pipes. */
@@ -87,8 +91,10 @@ class TestClient {
 function connect(overrides: Partial<AdapterOptions["bridge"]> = {}) {
   const clock = new FakeClock();
   const { factory, panes } = fakePaneFactory();
+  const store = memorySessionStore();
   const app = createAdapter({
     createPane: factory,
+    store,
     bridge: { ...DEFAULT_BRIDGE, now: clock.now, sleep: clock.sleep, ...overrides },
   });
   const toAgent = new PassThrough();
@@ -100,7 +106,7 @@ function connect(overrides: Partial<AdapterOptions["bridge"]> = {}) {
     ),
   );
   const client = new TestClient(toAgent, fromAgent);
-  return { client, panes, clock };
+  return { client, panes, clock, store };
 }
 
 async function initialize(client: TestClient): Promise<void> {
@@ -133,7 +139,7 @@ describe("ACP framing over stdio transport", () => {
     assert.equal(response.jsonrpc, "2.0");
     assert.equal(response.result?.protocolVersion, 1);
     assert.deepEqual(response.result?.agentInfo, { name: "freebuff-acp-adapter", version: "0.1.0" });
-    assert.equal((response.result?.agentCapabilities as Record<string, unknown>)?.loadSession, false);
+    assert.equal((response.result?.agentCapabilities as Record<string, unknown>)?.loadSession, true);
 
     // Framing: the whole reply is exactly one parseable JSON line.
     assert.equal(client.rawLines.length, 1);
@@ -256,6 +262,8 @@ describe("ACP framing over stdio transport", () => {
     const { factory, panes } = fakePaneFactory();
     const app = createAdapter({
       createPane: factory,
+      // In-memory: a test must never write into the real resume store.
+      store: memorySessionStore(),
       bridge: { pollIntervalMs: 10, quiescenceMs: 1_500, echoTimeoutMs: 1_000, maxTurnMs: 10_000, ...clock },
     });
     const toAgent = new PassThrough();
@@ -292,5 +300,278 @@ describe("ACP framing over stdio transport", () => {
 
     assert.deepEqual(response.result, { stopReason: "cancelled" });
     assert.equal(pane.sent.some((entry) => entry.keys === "C-c"), true);
+  });
+});
+/** A pane showing a resumed chat: transcript, then Freebuff's chrome. */
+function resumedScreen(chatTitle: string, userText: string, answer: string): string {
+  return [
+    "  freebuff",
+    "",
+    "   [02:42 PM]",
+    `   ${userText} ⎘`,
+    "",
+    `  ${answer}`,
+    "",
+    "╭────────────────────────────────────────────────────────────────────────────╮",
+    "│  ▍Enter a coding task or / for commands                                    │",
+    "╰────────────────────────────────────────────────────────────────────────────╯",
+    ` DeepSeek V4.1 Flash Slow · /tmp/project · Chat: ${chatTitle}`,
+    " ← for history · ? for help",
+  ].join("\n");
+}
+
+/** Connects an adapter whose panes are scripted by `configure`. */
+function connectResumed(options: { screen: string; store: ReturnType<typeof memorySessionStore>; configure?: (pane: FakePane) => void }) {
+  const clock = new FakeClock();
+  const { factory, panes } = fakePaneFactory(options.screen, options.configure);
+  const app = createAdapter({
+    createPane: factory,
+    store: options.store,
+    bridge: { ...DEFAULT_BRIDGE, now: clock.now, sleep: clock.sleep },
+  });
+  const toAgent = new PassThrough();
+  const fromAgent = new PassThrough();
+  app.connect(
+    ndJsonStream(
+      Writable.toWeb(fromAgent) as unknown as WritableStream<Uint8Array>,
+      Readable.toWeb(toAgent) as unknown as ReadableStream<Uint8Array>,
+    ),
+  );
+  return { client: new TestClient(toAgent, fromAgent), panes, clock };
+}
+
+describe("session/load (resume)", () => {
+  it("starts the pane with --continue and replays the restored conversation", async () => {
+    const title = "Remember the word ORANGE. Reply with just: STORED";
+    const store = memorySessionStore();
+    const { client, panes } = connectResumed({ screen: resumedScreen(title, title, "STORED"), store });
+    await initialize(client);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "session/load",
+      params: { sessionId: "freebuff-acp-9-abc", cwd: "/tmp/project", mcpServers: [] },
+    });
+    const response = await client.next((m) => m.id === 5);
+
+    assert.equal(response.error, undefined);
+    assert.equal(panes[0].meta.resume, true);
+    assert.equal(store.get("freebuff-acp-9-abc")?.title, title);
+
+    const replayed = client.rawLines
+      .map((line) => JSON.parse(line) as Message)
+      .filter((message) => message.method === "session/update")
+      .map((message) => {
+        const update = message.params?.update as { sessionUpdate: string; content: { text: string } };
+        return `${update.sessionUpdate}:${update.content.text.trim()}`;
+      });
+    assert.deepEqual(replayed, [
+      `user_message_chunk:${title}`,
+      "agent_message_chunk:STORED",
+    ]);
+  });
+
+  it("picks the recorded chat out of /history when --continue opened another", async () => {
+    const expected = "Remember the word BANANA. Reply with just: STORED2";
+    const store = memorySessionStore({ "freebuff-acp-7-xyz": { cwd: "/tmp/project", title: expected } });
+    const { client, panes } = connectResumed({
+      screen: resumedScreen("New chat", "", ""),
+      store,
+      configure: (pane) => {
+        // Typing /history and pressing Enter opens the picker; a second Enter
+        // picks the highlighted chat. Two Enters, exactly as the TUI behaves.
+        let pendingHistory = false;
+        pane.onSend = (keys) => {
+          if (keys === "/history") {
+            pendingHistory = true;
+            return;
+          }
+          if (keys !== "Enter") return;
+          if (pendingHistory) {
+            pendingHistory = false;
+            pane.screen = [
+              "                            Select a chat to resume",
+              "  ▍Search chats...",
+              "  ┌─────────────────────────────────────────────────────────────┐",
+              "  │ 1m ago    3 msgs   Something else entirely                  │",
+              `  │ 5m ago    3 msgs   ${expected} │`,
+              "  └─────────────────────────────────────────────────────────────┘",
+            ].join("\n");
+            return;
+          }
+          if (pane.screen.includes("Select a chat")) {
+            pane.screen = resumedScreen(expected, expected, "STORED2");
+          }
+        };
+      },
+    });
+    await initialize(client);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "session/load",
+      params: { sessionId: "freebuff-acp-7-xyz", cwd: "/tmp/project", mcpServers: [] },
+    });
+    const response = await client.next((m) => m.id === 5);
+
+    assert.equal(response.error, undefined);
+    assert.equal(panes[0].meta.resume, true);
+    assert.deepEqual(
+      panes[0].sent.map((entry) => entry.keys),
+      ["/history", "Enter", "Down", "Enter"],
+    );
+    assert.equal(store.get("freebuff-acp-7-xyz")?.title, expected);
+  });
+});
+
+describe("session/load serialisation", () => {
+  it("holds a prompt that arrives during the resume until the picker is done", async () => {
+    const expected = "Remember the word PLUM. Reply with just: STORED";
+    const store = memorySessionStore({ "freebuff-acp-5-q": { cwd: "/tmp/project", title: expected } });
+    const { client, panes } = connectResumed({
+      screen: resumedScreen("New chat", "", ""),
+      store,
+      configure: (pane) => {
+        let pendingHistory = false;
+        pane.onSend = (keys) => {
+          if (keys === "/history") {
+            pendingHistory = true;
+            return;
+          }
+          if (keys !== "Enter") return;
+          if (pendingHistory) {
+            pendingHistory = false;
+            pane.screen = [
+              "                            Select a chat to resume",
+              "  ▍Search chats...",
+              "  ╭─────────────────────────────────────────────────────╮",
+              `  │ 5m ago    3 msgs   ${expected} │`,
+              "  ╰─────────────────────────────────────────────────────╯",
+            ].join("\n");
+            return;
+          }
+          if (pane.screen.includes("Select a chat")) {
+            pane.screen = resumedScreen(expected, expected, "STORED");
+          }
+        };
+      },
+    });
+    await initialize(client);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "session/load",
+      params: { sessionId: "freebuff-acp-5-q", cwd: "/tmp/project", mcpServers: [] },
+    });
+    // The wake prompt a host sends on resume, dispatched without waiting.
+    client.send({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "session/prompt",
+      params: { sessionId: "freebuff-acp-5-q", prompt: [{ type: "text", text: "wake up" }] },
+    });
+
+    await client.next((m) => m.id === 5);
+    await client.next((m) => m.id === 6);
+
+    const keys = panes[0].sent.map((entry) => entry.keys);
+    // The picker navigation finishes before the wake prompt is typed.
+    assert.deepEqual(keys, ["/history", "Enter", "Enter", "wake up", "Enter"]);
+  });
+
+  it("rejects a second prompt that arrives during the same resume", async () => {
+    // Both prompts used to pass the "one turn at a time" check while the resume
+    // was in flight, and were then typed into the same composer: one garbled
+    // message, two responses.
+    const expected = "Remember the word PLUM. Reply with just: STORED";
+    const store = memorySessionStore({ "freebuff-acp-6-r": { cwd: "/tmp/project", title: expected } });
+    const { client, panes } = connectResumed({
+      screen: resumedScreen("New chat", "", ""),
+      store,
+      configure: (pane) => {
+        let pendingHistory = false;
+        pane.onSend = (keys) => {
+          if (keys === "/history") {
+            pendingHistory = true;
+            return;
+          }
+          if (keys !== "Enter") return;
+          if (pendingHistory) {
+            pendingHistory = false;
+            pane.screen = [
+              "                            Select a chat to resume",
+              "  ▍Search chats...",
+              "  ╭─────────────────────────────────────────────────────╮",
+              `  │ 5m ago    3 msgs   ${expected} │`,
+              "  ╰─────────────────────────────────────────────────────╯",
+            ].join("\n");
+            return;
+          }
+          if (pane.screen.includes("Select a chat")) {
+            pane.screen = resumedScreen(expected, expected, "STORED");
+          }
+        };
+      },
+    });
+    await initialize(client);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "session/load",
+      params: { sessionId: "freebuff-acp-6-r", cwd: "/tmp/project", mcpServers: [] },
+    });
+    for (const [id, text] of [
+      [6, "first prompt"],
+      [7, "second prompt"],
+    ] as [number, string][]) {
+      client.send({
+        jsonrpc: "2.0",
+        id,
+        method: "session/prompt",
+        params: { sessionId: "freebuff-acp-6-r", prompt: [{ type: "text", text }] },
+      });
+    }
+
+    await client.next((m) => m.id === 5);
+    const first = await client.next((m) => m.id === 6);
+    const second = await client.next((m) => m.id === 7);
+
+    const failed = [first, second].filter((m) => m.error !== undefined);
+    assert.equal(failed.length, 1, "exactly one of the two prompts must be rejected");
+    assert.equal((failed[0].error as { code: number }).code, -32000);
+
+    const typed = panes[0].sent.map((entry) => entry.keys).filter((keys) => keys.includes("prompt"));
+    assert.deepEqual(typed, ["first prompt"], "the rejected prompt must not reach the composer");
+  });
+});
+
+describe("session/load failure", () => {
+  it("closes the pane and reports the error when the conversation cannot be reopened", async () => {
+    const { client, panes } = connectResumed({
+      screen: resumedScreen("New chat", "", ""),
+      store: memorySessionStore(),
+      configure: (pane) => {
+        pane.capture = async () => {
+          throw new Error("pane exploded");
+        };
+      },
+    });
+    await initialize(client);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "session/load",
+      params: { sessionId: "freebuff-acp-8-boom", cwd: "/tmp/project", mcpServers: [] },
+    });
+    const response = await client.next((m) => m.id === 5);
+
+    assert.equal((response.error as { code: number }).code, -32000);
+    assert.match((response.error as { message: string }).message, /failed to resume the conversation/);
+    assert.equal(panes[0].stopped, true, "the half-resumed pane must not be left running");
   });
 });

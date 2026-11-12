@@ -34,6 +34,8 @@ export type PaneRequest = {
   sessionId: string;
   /** Working directory the agent session was created for. */
   cwd: string;
+  /** Start by continuing the working directory's most recent chat (`--continue`). */
+  resume?: boolean;
 };
 
 export type PaneFactory = (request: PaneRequest) => Promise<SessionPane>;
@@ -51,18 +53,60 @@ export type TmuxPaneOptions = {
   exec?: TmuxExec;
   cols?: number;
   rows?: number;
+  /**
+   * Process whose death takes the pane with it. Defaults to this process; pass
+   * `0` to leave the pane unattended (tests). See `watchdogCommand`.
+   */
+  watchParentPid?: number;
+  /** Reopen the working directory's most recent conversation (`--continue`). */
+  resume?: boolean;
 };
 
 export const DEFAULT_COMMAND_BIN = "freebuff";
+
+/**
+ * Pane geometry. The pane is never displayed, so it is made tall: the bridge
+ * captures the visible screen only, and rows that scroll out of it between two
+ * polls are lost, so a tall viewport buys the transcript room to grow. Short
+ * bursts (a few dozen lines) then never scroll past the capture.
+ */
+export const DEFAULT_PANE_COLS = 220;
+export const DEFAULT_PANE_ROWS = 200;
 
 /** Quotes a path for the POSIX shell command tmux runs with `sh -c`. */
 export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-/** The default pane command: launch the Freebuff TUI in the session cwd. */
-export function freebuffCommand(cwd: string, bin: string = DEFAULT_COMMAND_BIN): string {
-  return `${bin} --cwd ${shellQuote(cwd)}`;
+/**
+ * The default pane command: launch the Freebuff TUI in the session cwd, or with
+ * `--continue` to reopen the most recent conversation of that directory.
+ */
+export function freebuffCommand(
+  cwd: string,
+  bin: string = DEFAULT_COMMAND_BIN,
+  options: { resume?: boolean } = {},
+): string {
+  const resume = options.resume === true ? "--continue " : "";
+  return `${bin} ${resume}--cwd ${shellQuote(cwd)}`;
+}
+
+/**
+ * Wraps the pane command so the pane reaps itself when its owner disappears.
+ *
+ * The host stops a worker with an uncatchable signal, so no signal handler of
+ * ours runs and the tmux session of the hosted TUI would outlive the adapter,
+ * holding a Freebuff process and its terminal. The watcher runs beside the TUI
+ * (never touching the pty, which the TUI needs as its controlling terminal)
+ * and kills the session once `parentPid` is gone.
+ */
+export function watchdogCommand(
+  inner: string,
+  options: { session: string; parentPid: number; tmuxBin?: string },
+): string {
+  const tmux = shellQuote(options.tmuxBin ?? "tmux");
+  const watch = `while kill -0 ${options.parentPid} 2>/dev/null; do sleep 2; done; ${tmux} kill-session -t ${shellQuote(options.session)} 2>/dev/null`;
+  return `{ ${watch}; } & exec ${inner}`;
 }
 
 function defaultExec(tmuxBin: string): TmuxExec {
@@ -92,14 +136,35 @@ export class TmuxPaneSource implements SessionPane {
   /** Creates the detached tmux session and starts the TUI inside it. */
   async start(): Promise<void> {
     const { session, cwd } = this.options;
-    const command = this.options.command ?? freebuffCommand(cwd ?? process.cwd());
+    const inner =
+      this.options.command ?? freebuffCommand(cwd ?? process.cwd(), DEFAULT_COMMAND_BIN, { resume: this.options.resume });
+    const parentPid = this.options.watchParentPid ?? process.pid;
+    const command =
+      parentPid === 0
+        ? inner
+        : watchdogCommand(inner, { session, parentPid, tmuxBin: this.tmuxBin });
     const args = ["new-session", "-d", "-s", session];
     if (cwd !== undefined) {
       args.push("-c", cwd);
     }
-    args.push("-x", String(this.options.cols ?? 220), "-y", String(this.options.rows ?? 50), command);
+    args.push(
+      "-x",
+      String(this.options.cols ?? DEFAULT_PANE_COLS),
+      "-y",
+      String(this.options.rows ?? DEFAULT_PANE_ROWS),
+      command,
+    );
+    // A resumed session reuses the ACP session id as its tmux name, so a pane
+    // left behind by a killed predecessor has to go before the new one starts.
+    if (this.options.resume === true) {
+      try {
+        await this.exec(["kill-session", "-t", session]);
+      } catch {
+        // Nothing to reclaim.
+      }
+    }
     await this.exec(args);
-    trackPane(session);
+    trackPane(session, this.tmuxBin);
   }
 
   async capture(): Promise<string> {
@@ -152,17 +217,20 @@ export function createTmuxPaneFactory(
       command: options.command,
       cols: options.cols,
       rows: options.rows,
+      resume: request.resume,
     });
     await pane.start();
     return pane;
   };
 }
 
-const liveSessions = new Set<string>();
+// Session name -> the tmux binary that owns it, so teardown uses the same tmux
+// the pane was started with (FREEBUFF_ACP_TMUX is not necessarily `tmux`).
+const liveSessions = new Map<string, string>();
 
 /** Registers a session so `stopAllPanes` can tear it down on process exit. */
-export function trackPane(session: string): void {
-  liveSessions.add(session);
+export function trackPane(session: string, tmuxBin = "tmux"): void {
+  liveSessions.set(session, tmuxBin);
 }
 
 /** Unregisters a session after it has been stopped. */
@@ -175,12 +243,12 @@ export function untrackPane(session: string): void {
  * kill is used from a process `exit` handler, where async work cannot finish.
  */
 export function stopAllPanes(sync = false): void {
-  for (const session of liveSessions) {
+  for (const [session, tmuxBin] of liveSessions) {
     try {
       if (sync) {
-        execFileSync("tmux", ["kill-session", "-t", session], { stdio: "ignore" });
+        execFileSync(tmuxBin, ["kill-session", "-t", session], { stdio: "ignore" });
       } else {
-        void execFileAsync("tmux", ["kill-session", "-t", session]).catch(() => {});
+        void execFileAsync(tmuxBin, ["kill-session", "-t", session]).catch(() => {});
       }
     } catch {
       // Session already gone or tmux unavailable: nothing to clean up.

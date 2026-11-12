@@ -2,14 +2,28 @@
 // pane shows as ACP `session/update` chunks.
 //
 // Because Freebuff is a TUI with no headless mode, a turn is heuristic:
-//   1. snapshot the screen, type the prompt, send Enter,
-//   2. wait for the TUI to echo the prompt and drop that echo from the diff,
-//   3. poll the pane, streaming every newly appended bit of text,
-//   4. finish with `end_turn` once the screen has been quiet for
-//      `quiescenceMs`, or with `cancelled` when `session/cancel` interrupts it.
+//   1. wait for the TUI to settle at its prompt (a prompt typed during startup
+//      is dropped), then snapshot the screen as the diff baseline,
+//   2. type the prompt, send Enter, and wait for the user's message to reach the
+//      transcript so that copy is dropped from the diff,
+//   3. poll the pane, streaming every newly appended bit of *transcript* text --
+//      the TUI's own chrome (input box, status line, ads, footer) is cut out,
+//   4. finish with `end_turn` once the transcript has been quiet for
+//      `quiescenceMs` and the status line no longer says the agent is working,
+//      or with `cancelled` when `session/cancel` interrupts it.
 
 import type { StopReason } from "@agentclientprotocol/sdk";
-import { ScreenTracker, normalizeScreen } from "./screen.ts";
+import {
+  ScreenTracker,
+  chatHistoryRows,
+  chatTitle,
+  extractTranscript,
+  isChatHistoryScreen,
+  isPromptVisible,
+  isWorkingScreen,
+  normalizeScreen,
+  splitTranscriptMessages,
+} from "./screen.ts";
 import type { PaneSource } from "./pane.ts";
 
 export const INTERRUPT_KEY = "C-c";
@@ -24,6 +38,8 @@ export type BridgeConfig = {
   echoTimeoutMs: number;
   /** Hard cap on a whole turn; a blocked pane (e.g. a modal) ends here. */
   maxTurnMs: number;
+  /** How long to wait for the TUI to settle at its prompt before typing. */
+  startupTimeoutMs: number;
   now: () => number;
   sleep: (ms: number) => Promise<void>;
 };
@@ -31,9 +47,17 @@ export type BridgeConfig = {
 export const DEFAULT_BRIDGE_CONFIG: Omit<BridgeConfig, "now" | "sleep"> = {
   pollIntervalMs: 250,
   quiescenceMs: 2_000,
-  echoTimeoutMs: 2_000,
+  echoTimeoutMs: 10_000,
   maxTurnMs: 300_000,
+  startupTimeoutMs: 90_000,
 };
+
+/**
+ * Identical ready screens needed before typing. Freebuff paints its input box
+ * while it is still starting up (and swapping models), and keystrokes sent in
+ * that window are dropped, so a single sighting of the prompt is not enough.
+ */
+export const READY_STABLE_CAPTURES = 3;
 
 /** Real-time clock helpers used outside of tests. */
 export function systemClock(): Pick<BridgeConfig, "now" | "sleep"> {
@@ -98,6 +122,12 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
   const { pane, promptText, config, events } = request;
   let streamedChars = 0;
 
+  // Type only once the TUI is up and steady. Without this the prompt is sent
+  // into a still-painting startup screen and silently dropped.
+  if (!(await waitForReady(pane, config, () => events.isCancelled()))) {
+    return { stopReason: "cancelled", streamedChars };
+  }
+
   const baseline = await pane.capture();
   const tracker = new ScreenTracker(baseline);
 
@@ -107,18 +137,26 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
   await pane.send(promptText, { literal: true });
   await pane.send(SUBMIT_KEY);
 
-  // Wait for the TUI to echo the prompt so it is not streamed back as
-  // assistant output. If no echo ever appears, the original baseline is kept
-  // and nothing is skipped.
+  // Wait for the TUI to echo the prompt into the transcript so it is not
+  // streamed back as assistant output. The search runs over the transcript, not
+  // the whole screen: the composer echoes the text the instant it is typed, and
+  // the user's message only reaches the transcript on submit, which is the copy
+  // that must be suppressed. If no echo ever appears, the original baseline is
+  // kept and nothing is skipped.
   const promptNeedle = promptText.split("\n")[0].trim();
+  // Still waiting for the echo: the main loop keeps watching for it, because a
+  // long prompt can take longer to reach the transcript than the initial window
+  // and the echo would otherwise be streamed back as assistant output.
+  let echoPending = promptNeedle !== "";
   const echoDeadline = config.now() + config.echoTimeoutMs;
-  while (config.now() < echoDeadline) {
+  while (echoPending && config.now() < echoDeadline) {
     if (events.isCancelled()) {
       break;
     }
     const screen = await pane.capture();
-    if (promptNeedle !== "" && normalizeJoined(screen).includes(promptNeedle)) {
+    if (promptNeedle !== "" && transcriptText(screen).includes(promptNeedle)) {
       tracker.reset(screen);
+      echoPending = false;
       break;
     }
     await config.sleep(config.pollIntervalMs);
@@ -136,6 +174,14 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
     }
 
     const screen = await pane.capture();
+    if (echoPending && transcriptText(screen).includes(promptNeedle)) {
+      // The echo arrived late: rebase on it instead of streaming the user's own
+      // message back as assistant output.
+      tracker.reset(screen);
+      echoPending = false;
+      await config.sleep(config.pollIntervalMs);
+      continue;
+    }
     const delta = tracker.update(screen);
     if (delta !== "") {
       // New screen lines carry a leading newline for reconstruction; the very
@@ -151,7 +197,7 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
     }
 
     if (!permissionNoticed) {
-      const pattern = findPermissionPrompt(normalizeJoined(screen));
+      const pattern = findPermissionPrompt(transcriptText(screen));
       if (pattern !== null) {
         permissionNoticed = true;
         await events.onNotice({
@@ -165,7 +211,9 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
       }
     }
 
-    if (sawChange && config.now() - lastChangeAt >= config.quiescenceMs) {
+    // A pause in the transcript is not a finished turn while the status line
+    // still says the agent is working.
+    if (sawChange && !isWorkingScreen(screen) && config.now() - lastChangeAt >= config.quiescenceMs) {
       return { stopReason: "end_turn", streamedChars };
     }
     await config.sleep(config.pollIntervalMs);
@@ -176,6 +224,119 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
   return { stopReason: "end_turn", streamedChars };
 }
 
-function normalizeJoined(raw: string): string {
-  return normalizeScreen(raw).join("\n");
+export type ResumeResult = {
+  /** True when the pane is showing the chat that was asked for. */
+  restored: boolean;
+  /** Title of the chat the pane now has open, when it shows one. */
+  title: string | null;
+  /** The restored conversation, as messages a host can replay. */
+  messages: { role: "user" | "agent"; text: string }[];
+};
+
+/** How long to wait for the `/history` picker to open, list rows, and close. */
+export const RESUME_PICKER_TIMEOUT_MS = 15_000;
+
+export type ResumeRequest = {
+  pane: PaneSource;
+  config: BridgeConfig;
+  /** Title recorded for this session; null when the adapter never saw it. */
+  title: string | null;
+};
+
+/**
+ * Reopens a conversation in a freshly started pane and reports what it shows.
+ *
+ * `session/new` with `--continue` reopens the working directory's most recent
+ * chat, which is usually the right one but not always: a directory can hold
+ * several chats. When the recorded title does not match what came up, the TUI's
+ * own `/history` picker is used to select the recorded chat instead.
+ */
+export async function resumeChat(request: ResumeRequest): Promise<ResumeResult> {
+  const { pane, config, title: expected } = request;
+  await waitForReady(pane, config, () => false);
+
+  let screen = await pane.capture();
+  let title = chatTitle(screen);
+  if (expected === null || titleMatches(title, expected)) {
+    return { restored: expected === null || titleMatches(title, expected), title, messages: resumedMessages(screen) };
+  }
+
+  // Pick the chat out of the TUI's history list instead.
+  await pane.send("/history", { literal: true });
+  await pane.send(SUBMIT_KEY);
+  const deadline = config.now() + RESUME_PICKER_TIMEOUT_MS;
+  let rows: string[] = [];
+  while (config.now() < deadline) {
+    const listing = await pane.capture();
+    if (isChatHistoryScreen(listing)) {
+      rows = chatHistoryRows(listing);
+      if (rows.length > 0) break;
+    }
+    await config.sleep(config.pollIntervalMs);
+  }
+
+  const index = rows.findIndex((row) => titleMatches(row, expected));
+  if (index < 0) {
+    // Nothing matched: close the picker and keep whatever chat is open.
+    await pane.send("Escape");
+    return { restored: false, title: chatTitle(screen), messages: resumedMessages(screen) };
+  }
+  for (let i = 0; i < index; i++) {
+    await pane.send("Down");
+  }
+  await pane.send(SUBMIT_KEY);
+  await waitForReady(pane, config, () => false);
+  screen = await pane.capture();
+  title = chatTitle(screen);
+  return { restored: titleMatches(title, expected), title, messages: resumedMessages(screen) };
+}
+
+/**
+ * Compares a chat title from the TUI with a recorded one. The picker truncates
+ * long titles, so one being a prefix of the other counts as a match.
+ */
+function titleMatches(actual: string | null, expected: string): boolean {
+  if (actual === null) return false;
+  const a = actual.trim();
+  const b = expected.trim();
+  if (a === "" || b === "") return false;
+  return a === b || a.startsWith(b) || b.startsWith(a);
+}
+
+function resumedMessages(screen: string): { role: "user" | "agent"; text: string }[] {
+  return splitTranscriptMessages(extractTranscript(screen));
+}
+
+/**
+ * Polls until the TUI shows its prompt and the screen has stopped changing.
+ * Returns false only when the wait was cancelled; a pane that never settles is
+ * used anyway, since a best-effort turn beats failing.
+ */
+async function waitForReady(
+  pane: PaneSource,
+  config: BridgeConfig,
+  isCancelled: () => boolean,
+): Promise<boolean> {
+  const deadline = config.now() + config.startupTimeoutMs;
+  let previous: string | null = null;
+  let stable = 0;
+  for (;;) {
+    const screen = await pane.capture();
+    const ready = isPromptVisible(normalizeScreen(screen));
+    if (ready && previous !== null && screen === previous) {
+      stable += 1;
+      if (stable >= READY_STABLE_CAPTURES) return true;
+    } else {
+      stable = 0;
+    }
+    previous = screen;
+    if (config.now() >= deadline) return true;
+    if (isCancelled()) return false;
+    await config.sleep(config.pollIntervalMs);
+  }
+}
+
+/** The transcript text of a raw capture, joined for substring matching. */
+function transcriptText(raw: string): string {
+  return extractTranscript(raw).join("\n");
 }
