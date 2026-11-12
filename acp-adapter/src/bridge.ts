@@ -408,6 +408,9 @@ function titleMatches(actual: string | null, expected: string): boolean {
  */
 function historyRowIndex(rows: string[], expected: string): number {
   const want = expected.trim();
+  // An empty title matches every row by prefix, which would open whichever
+  // chat happens to be first.
+  if (want === "") return -1;
   const exact = rows.findIndex((row) => row.trim() === want);
   if (exact >= 0) return exact;
   const matches: number[] = [];

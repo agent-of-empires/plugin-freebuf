@@ -577,37 +577,6 @@ describe("resumeChat", () => {
       " ← for history · ? for help",
     ].join("\n");
 
-  /** A pane showing one chat, scripted so `/history` opens the picker. */
-  function scriptedPane(footerTitle: string, rows: string[]): { pane: FakePane; clock: FakeClock; sent: string[] } {
-    const clock = new FakeClock();
-    const pane = new FakePane(meta, withFooter(footerTitle));
-    let picker = false;
-    pane.onSend = (keys) => {
-      if (keys === "/history") {
-        picker = true;
-        return;
-      }
-      if (keys !== "Enter") return;
-      if (picker) {
-        picker = false;
-        pane.screen = [
-          "                            Select a chat to resume",
-          "  ▍Search chats...",
-          "  ╭─────────────────────────────────────────────────────╮",
-          ...rows.map((row) => `  │ ${row} │`),
-          "  ╰─────────────────────────────────────────────────────╯",
-          "  ↑↓ navigate · → / Enter open chat · Esc cancel",
-        ].join("\n");
-        return;
-      }
-      if (pane.screen.includes("Select a chat")) {
-        const title = rows[0].split("msgs")[1].trim();
-        pane.screen = withFooter(title);
-      }
-    };
-    return { pane, clock, sent: [] };
-  }
-
   /** Serves the picker, tracking arrow-key navigation to the opened row. */
   function pickerPane(footerTitle: string, rows: string[]): { pane: FakePane; opened: () => string } {
     const pane = new FakePane(meta, withFooter(footerTitle));
@@ -667,10 +636,24 @@ describe("resumeChat", () => {
     assert.ok(pane.sent.some((entry) => entry.keys === "Escape"), "the picker was left open");
   });
 
+  it("does not open a chat when the recorded title is empty", async () => {
+    // An empty title is a prefix of every row, so without the guard the first
+    // chat in the picker would be opened and then rejected by the footer check.
+    const clock = new FakeClock();
+    const { pane } = pickerPane("Fix tests on macOS", ["just now   3 msgs   Fix tests"]);
+    const result = await resumeChat({ pane, config: testConfig(clock), title: "" });
+
+    assert.equal(result.restored, false);
+    assert.ok(pane.sent.some((entry) => entry.keys === "Escape"), "the picker was left open");
+    // No arrow key: nothing was selected, so the row was never opened.
+    assert.ok(!pane.sent.some((entry) => entry.keys === "Down"), "a row was selected for an empty title");
+  });
+
   it("does not accept a footer title that only starts the same way", async () => {
     // `--continue` opened a different chat whose name shares a prefix: taking
     // that as a match would replay the wrong conversation.
-    const { pane, clock } = scriptedPane("Fix tests on macOS", ["just now   3 msgs   Fix tests"]);
+    const clock = new FakeClock();
+    const { pane } = pickerPane("Fix tests on macOS", ["just now   3 msgs   Fix tests"]);
     const result = await resumeChat({
       pane,
       config: testConfig(clock),

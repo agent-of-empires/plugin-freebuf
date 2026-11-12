@@ -35,24 +35,34 @@ describe("freebuffCommand", () => {
 
 describe("watchdogCommand", () => {
   it("kills the session once the owner pid is gone, then execs the TUI", () => {
-    const command = watchdogCommand("freebuff --cwd '/tmp/x'", {
+    const inner = "freebuff --cwd '/tmp/x'";
+    const command = watchdogCommand(inner, {
       session: "freebuff-acp-1-abc",
       parentPid: 4242,
     });
     // `=` makes tmux match the name exactly instead of accepting a prefix.
-    assert.match(command, /while kill -0 4242 2>\/dev\/null; do sleep 2; done; 'tmux' kill-session -t '=freebuff-acp-1-abc'/);
+    assert.match(unwrap(command), /while kill -0 4242 2>\/dev\/null; do sleep 2; done; 'tmux' kill-session -t '=freebuff-acp-1-abc'/);
     // Through a shell: a configured command may start with an assignment prefix.
-    assert.ok(command.endsWith(`} & exec sh -c ${shellQuote("freebuff --cwd '/tmp/x'")}`));
+    assert.ok(unwrap(command).endsWith(`exec ${inner}`));
     // The TUI must stay in the foreground: it needs the pty as its terminal.
-    assert.ok(!command.includes("freebuff --cwd '/tmp/x' &"));
+    assert.ok(!command.includes(`${inner} &`));
+  });
+
+  it("hands tmux one quoted word, whatever the user's login shell is", () => {
+    // tmux parses a shell-command with `default-shell`, which can be fish or
+    // nushell: `{ ...; } &`, `while ...; do` and quotes would be rejected there,
+    // so the job control has to be inside the `sh -c` argument.
+    const command = watchdogCommand("freebuff", { session: "s", parentPid: 4242 });
+    assert.match(command, /^exec sh -c '.*'$/);
+    assert.ok(!/^[{[]/.test(command));
   });
 
   it("runs an env-prefixed command through a shell so the assignment applies", () => {
     const inner = "MODE=dev freebuff --cwd '/tmp/x'";
     const command = watchdogCommand(inner, { session: "s", parentPid: 1 });
     // `exec MODE=dev freebuff ...` is not a command: the prefix needs a shell.
-    assert.ok(command.endsWith(`} & exec sh -c ${shellQuote(inner)}`));
-    assert.ok(!command.includes(`exec ${inner}`));
+    assert.ok(unwrap(command).endsWith(`exec ${inner}`));
+    assert.ok(!unwrap(command).includes(`exec ${shellQuote(inner)}`));
   });
 
   it("uses the configured tmux binary", () => {
@@ -61,9 +71,19 @@ describe("watchdogCommand", () => {
       parentPid: 1,
       tmuxBin: "/opt/homebrew/bin/tmux",
     });
-    assert.ok(command.includes(`'${"/opt/homebrew/bin/tmux"}' kill-session -t '=s'`));
+    assert.ok(unwrap(command).includes(`'${"/opt/homebrew/bin/tmux"}' kill-session -t '=s'`));
   });
 });
+
+/** The script tmux is handed: the single argument of `exec sh -c <quoted>`. */
+function unwrap(command: string): string {
+  const prefix = "exec sh -c ";
+  assert.ok(command.startsWith(prefix), `not a quoted sh -c: ${command}`);
+  const quoted = command.slice(prefix.length);
+  assert.equal(quoted[0], "'");
+  assert.equal(quoted[quoted.length - 1], "'");
+  return quoted.slice(1, -1).replace(/'\\''/g, "'");
+}
 
 describe("TmuxPaneSource.start", () => {
   it("creates a tall detached session and wraps the command in the watchdog", async () => {
@@ -122,6 +142,6 @@ describe("TmuxPaneSource.start", () => {
     const { exec, calls } = fakeTmux();
     const pane = new TmuxPaneSource({ session: "s", exec });
     await pane.capture();
-    assert.deepEqual(calls[0], ["capture-pane", "-p", "-e", "-t", "s"]);
+    assert.deepEqual(calls[0], ["capture-pane", "-p", "-e", "-t", "=s"]);
   });
 });

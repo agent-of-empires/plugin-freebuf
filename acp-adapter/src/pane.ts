@@ -73,9 +73,21 @@ export const DEFAULT_COMMAND_BIN = "freebuff";
 export const DEFAULT_PANE_COLS = 220;
 export const DEFAULT_PANE_ROWS = 200;
 
-/** Quotes a path for the POSIX shell command tmux runs with `sh -c`. */
+/** Quotes one word for the shell command tmux runs. */
 export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * A tmux session target that matches the name and nothing else.
+ *
+ * Without the `=` prefix tmux resolves `-t` as a session id, an exact name, or
+ * failing both, a prefix and then a pattern. Session names here come from the
+ * host's session id, so a bare name could reach a different session whose name
+ * starts the same way once ours is gone.
+ */
+export function exactTarget(session: string): string {
+  return `=${session}`;
 }
 
 /**
@@ -105,11 +117,14 @@ export function watchdogCommand(
   options: { session: string; parentPid: number; tmuxBin?: string },
 ): string {
   const tmux = shellQuote(options.tmuxBin ?? "tmux");
-  const watch = `while kill -0 ${options.parentPid} 2>/dev/null; do sleep 2; done; ${tmux} kill-session -t ${shellQuote(`=${options.session}`)} 2>/dev/null`;
-  // Through a shell, not straight after `exec`: a configured command may carry
-  // an assignment prefix (`MODE=dev freebuff ...`), which `exec` would read as
-  // the name of the program instead of the environment it sets.
-  return `{ ${watch}; } & exec sh -c ${shellQuote(inner)}`;
+  const watch = `while kill -0 ${options.parentPid} 2>/dev/null; do sleep 2; done; ${tmux} kill-session -t ${shellQuote(exactTarget(options.session))} 2>/dev/null`;
+  // tmux runs its command through `default-shell`, which is not necessarily
+  // POSIX (fish and nushell are common), so tmux must only see plain quoted
+  // words: the job control goes to `sh -c` along with the command itself. And
+  // through `sh -c` rather than straight after `exec` because a configured
+  // command may carry an assignment prefix (`MODE=dev freebuff ...`), which
+  // `exec` would read as the name of the program instead of its environment.
+  return `exec sh -c ${shellQuote(`{ ${watch}; } & exec ${inner}`)}`;
 }
 
 function defaultExec(tmuxBin: string): TmuxExec {
@@ -159,11 +174,9 @@ export class TmuxPaneSource implements SessionPane {
     );
     // A resumed session reuses the ACP session id as its tmux name, so a pane
     // left behind by a killed predecessor has to go before the new one starts.
-    // The `=` prefix makes tmux match the name exactly: without it `-t` also
-    // accepts a prefix or a pattern, and the session id comes from the host.
     if (this.options.resume === true) {
       try {
-        await this.exec(["kill-session", "-t", `=${session}`]);
+        await this.exec(["kill-session", "-t", exactTarget(session)]);
       } catch {
         // Nothing to reclaim.
       }
@@ -175,11 +188,11 @@ export class TmuxPaneSource implements SessionPane {
   async capture(): Promise<string> {
     // `-e` keeps escape sequences so the caller sees exactly what a terminal
     // would; `stripAnsi` runs on the diffing side.
-    return await this.exec(["capture-pane", "-p", "-e", "-t", this.options.session]);
+    return await this.exec(["capture-pane", "-p", "-e", "-t", exactTarget(this.options.session)]);
   }
 
   async send(keys: string, options?: SendOptions): Promise<void> {
-    const args = ["send-keys", "-t", this.options.session];
+    const args = ["send-keys", "-t", exactTarget(this.options.session)];
     if (options?.literal) {
       args.push("-l");
     }
@@ -190,7 +203,7 @@ export class TmuxPaneSource implements SessionPane {
   async stop(): Promise<void> {
     untrackPane(this.options.session);
     try {
-      await this.exec(["kill-session", "-t", this.options.session]);
+      await this.exec(["kill-session", "-t", exactTarget(this.options.session)]);
     } catch {
       // Already gone: stopping twice is not an error.
     }
@@ -200,7 +213,7 @@ export class TmuxPaneSource implements SessionPane {
 /** True when the tmux session behind `session` still exists. */
 export async function tmuxSessionExists(session: string, tmuxBin = "tmux"): Promise<boolean> {
   try {
-    await defaultExec(tmuxBin)(["has-session", "-t", session]);
+    await defaultExec(tmuxBin)(["has-session", "-t", exactTarget(session)]);
     return true;
   } catch {
     return false;
@@ -251,9 +264,9 @@ export function stopAllPanes(sync = false): void {
   for (const [session, tmuxBin] of liveSessions) {
     try {
       if (sync) {
-        execFileSync(tmuxBin, ["kill-session", "-t", session], { stdio: "ignore" });
+        execFileSync(tmuxBin, ["kill-session", "-t", exactTarget(session)], { stdio: "ignore" });
       } else {
-        void execFileAsync(tmuxBin, ["kill-session", "-t", session]).catch(() => {});
+        void execFileAsync(tmuxBin, ["kill-session", "-t", exactTarget(session)]).catch(() => {});
       }
     } catch {
       // Session already gone or tmux unavailable: nothing to clean up.
