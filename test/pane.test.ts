@@ -99,6 +99,23 @@ describe("pane classification", () => {
     expect(classifyPane(IDLE_PANE)).toBe("idle");
   });
 
+  it("ignores a dialog-shaped panel the session printed above the composer", () => {
+    // A real dialog replaces the composer, so the box drawn as output is given
+    // away by the composer underneath it.
+    const printed = [
+      "  The panel reads:",
+      "╭──────────────── Some questions for you ────────────────╮",
+      "│                                                Close ✕ │",
+      "╰────────────────────────────────────────────────────────╯",
+      " working...  1m 31s   ■ Esc",
+      "╭────────────────────────────────────────────────────────╮",
+      "│  ▍Add to the current task (/ for commands)             │",
+      "╰────────────────────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(printed)).toBe("running");
+    expect(classifyPane(printed.replace(" working...  1m 31s   ■ Esc\n", ""))).toBe("idle");
+  });
+
   it("prefers a dialog over the working line it was drawn across", () => {
     expect(classifyPane(`${RUNNING_PANE}\n${WAITING_PANE}`)).toBe("waiting");
   });
