@@ -2,14 +2,24 @@
 // pane shows as ACP `session/update` chunks.
 //
 // Because Freebuff is a TUI with no headless mode, a turn is heuristic:
-//   1. snapshot the screen, type the prompt, send Enter,
-//   2. wait for the TUI to echo the prompt and drop that echo from the diff,
-//   3. poll the pane, streaming every newly appended bit of text,
-//   4. finish with `end_turn` once the screen has been quiet for
-//      `quiescenceMs`, or with `cancelled` when `session/cancel` interrupts it.
+//   1. wait for the TUI to settle at its prompt (a prompt typed during startup
+//      is dropped), then snapshot the screen as the diff baseline,
+//   2. type the prompt, send Enter, and wait for the user's message to reach the
+//      transcript so that copy is dropped from the diff,
+//   3. poll the pane, streaming every newly appended bit of *transcript* text --
+//      the TUI's own chrome (input box, status line, ads, footer) is cut out,
+//   4. finish with `end_turn` once the transcript has been quiet for
+//      `quiescenceMs` and the status line no longer says the agent is working,
+//      or with `cancelled` when `session/cancel` interrupts it.
 
 import type { StopReason } from "@agentclientprotocol/sdk";
-import { ScreenTracker, normalizeScreen } from "./screen.ts";
+import {
+  ScreenTracker,
+  extractTranscript,
+  isPromptVisible,
+  isWorkingScreen,
+  normalizeScreen,
+} from "./screen.ts";
 import type { PaneSource } from "./pane.ts";
 
 export const INTERRUPT_KEY = "C-c";
@@ -22,8 +32,13 @@ export type BridgeConfig = {
   quiescenceMs: number;
   /** How long to wait for the TUI to echo the prompt before giving up on suppressing it. */
   echoTimeoutMs: number;
-  /** Hard cap on a whole turn; a blocked pane (e.g. a modal) ends here. */
+  /**
+   * Cap on the capture loop of a turn; a blocked pane (e.g. a modal) ends here.
+   * The readiness wait before the prompt is typed runs on its own budget.
+   */
   maxTurnMs: number;
+  /** How long to wait for the TUI to settle at its prompt before typing. */
+  startupTimeoutMs: number;
   now: () => number;
   sleep: (ms: number) => Promise<void>;
 };
@@ -31,9 +46,17 @@ export type BridgeConfig = {
 export const DEFAULT_BRIDGE_CONFIG: Omit<BridgeConfig, "now" | "sleep"> = {
   pollIntervalMs: 250,
   quiescenceMs: 2_000,
-  echoTimeoutMs: 2_000,
+  echoTimeoutMs: 10_000,
   maxTurnMs: 300_000,
+  startupTimeoutMs: 90_000,
 };
+
+/**
+ * Identical ready screens needed before typing. Freebuff paints its input box
+ * while it is still starting up (and swapping models), and keystrokes sent in
+ * that window are dropped, so a single sighting of the prompt is not enough.
+ */
+export const READY_STABLE_CAPTURES = 3;
 
 /** Real-time clock helpers used outside of tests. */
 export function systemClock(): Pick<BridgeConfig, "now" | "sleep"> {
@@ -98,7 +121,22 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
   const { pane, promptText, config, events } = request;
   let streamedChars = 0;
 
+  // Type only once the TUI is up and steady. Without this the prompt is sent
+  // into a still-painting startup screen and silently dropped.
+  const readiness = await waitForReady(pane, config, () => events.isCancelled());
+  if (readiness === "cancelled") {
+    return { stopReason: "cancelled", streamedChars };
+  }
+  if (readiness === "timeout") {
+    throw new Error(NOT_READY);
+  }
+
   const baseline = await pane.capture();
+  // The capture can take a while; a cancel that landed during it must not be
+  // followed by typing the prompt.
+  if (events.isCancelled()) {
+    return { stopReason: "cancelled", streamedChars };
+  }
   const tracker = new ScreenTracker(baseline);
 
   // Type the prompt as literal text, then submit it. The literal flag matters:
@@ -107,18 +145,37 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
   await pane.send(promptText, { literal: true });
   await pane.send(SUBMIT_KEY);
 
-  // Wait for the TUI to echo the prompt so it is not streamed back as
-  // assistant output. If no echo ever appears, the original baseline is kept
-  // and nothing is skipped.
+  // Wait for the TUI to echo the prompt into the transcript so it is not
+  // streamed back as assistant output. The search runs over the transcript, not
+  // the whole screen: the composer echoes the text the instant it is typed, and
+  // the user's message only reaches the transcript on submit, which is the copy
+  // that must be suppressed. If no echo ever appears, the original baseline is
+  // kept and nothing is skipped.
   const promptNeedle = promptText.split("\n")[0].trim();
+  // The TUI wraps a long prompt over several rows, so the echo has to be found
+  // in whitespace-collapsed text: the needle is one source line and never
+  // matches the rows as they are drawn.
+  const echoNeedle = collapse(promptNeedle);
+  // A prompt the user has sent before is already in the transcript, so finding
+  // the needle is not enough: the echo is the one occurrence past the baseline.
+  const baselineEchoes = echoNeedle === "" ? 0 : occurrences(collapse(transcriptText(baseline)), echoNeedle);
+  const echoed = (screen: string): boolean => {
+    if (echoNeedle === "") return false;
+    return occurrences(collapse(transcriptText(screen)), echoNeedle) > baselineEchoes;
+  };
+  // Still waiting for the echo: the main loop keeps watching for it, because a
+  // long prompt can take longer to reach the transcript than the initial window
+  // and the echo would otherwise be streamed back as assistant output.
+  let echoPending = echoNeedle !== "";
   const echoDeadline = config.now() + config.echoTimeoutMs;
-  while (config.now() < echoDeadline) {
+  while (echoPending && config.now() < echoDeadline) {
     if (events.isCancelled()) {
       break;
     }
     const screen = await pane.capture();
-    if (promptNeedle !== "" && normalizeJoined(screen).includes(promptNeedle)) {
+    if (echoed(screen)) {
       tracker.reset(screen);
+      echoPending = false;
       break;
     }
     await config.sleep(config.pollIntervalMs);
@@ -136,6 +193,14 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
     }
 
     const screen = await pane.capture();
+    if (echoPending && echoed(screen)) {
+      // The echo arrived late: rebase on it instead of streaming the user's own
+      // message back as assistant output.
+      tracker.reset(screen);
+      echoPending = false;
+      await config.sleep(config.pollIntervalMs);
+      continue;
+    }
     const delta = tracker.update(screen);
     if (delta !== "") {
       // New screen lines carry a leading newline for reconstruction; the very
@@ -151,7 +216,7 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
     }
 
     if (!permissionNoticed) {
-      const pattern = findPermissionPrompt(normalizeJoined(screen));
+      const pattern = findPermissionPrompt(transcriptText(screen));
       if (pattern !== null) {
         permissionNoticed = true;
         await events.onNotice({
@@ -165,7 +230,9 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
       }
     }
 
-    if (sawChange && config.now() - lastChangeAt >= config.quiescenceMs) {
+    // A pause in the transcript is not a finished turn while the status line
+    // still says the agent is working.
+    if (sawChange && !isWorkingScreen(screen) && config.now() - lastChangeAt >= config.quiescenceMs) {
       return { stopReason: "end_turn", streamedChars };
     }
     await config.sleep(config.pollIntervalMs);
@@ -176,6 +243,68 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
   return { stopReason: "end_turn", streamedChars };
 }
 
-function normalizeJoined(raw: string): string {
-  return normalizeScreen(raw).join("\n");
+/** Why the wait for a usable TUI ended. */
+type Readiness = "ready" | "cancelled" | "timeout";
+
+/** Error text for a pane that never reached its composer. */
+const NOT_READY = "the Freebuff pane never showed its input prompt";
+
+/**
+ * Polls until the TUI shows its prompt and the screen has stopped changing.
+ *
+ * A timeout is a failure rather than a ready screen: the wait exists because
+ * keystrokes sent into a startup screen or a modal are silently dropped, so
+ * typing at the deadline would send the prompt nowhere.
+ */
+async function waitForReady(
+  pane: PaneSource,
+  config: BridgeConfig,
+  isCancelled: () => boolean,
+): Promise<Readiness> {
+  const deadline = config.now() + config.startupTimeoutMs;
+  let previous: string | null = null;
+  let stable = 0;
+  for (;;) {
+    // Cancellation wins over readiness: a prompt that arrives after the host
+    // gave up must not be typed into the pane.
+    if (isCancelled()) return "cancelled";
+    const screen = await pane.capture();
+    if (isCancelled()) return "cancelled";
+    const ready = isPromptVisible(normalizeScreen(screen));
+    if (ready && previous !== null && screen === previous) {
+      stable += 1;
+      if (stable >= READY_STABLE_CAPTURES) return "ready";
+    } else {
+      stable = 0;
+    }
+    previous = screen;
+    if (config.now() >= deadline) return "timeout";
+    await config.sleep(config.pollIntervalMs);
+  }
+}
+
+/** The transcript text of a raw capture, joined for substring matching. */
+function transcriptText(raw: string): string {
+  return extractTranscript(raw).join("\n");
+}
+
+/**
+ * Text reduced to the characters worth matching: whitespace runs (a wrapped row
+ * breaks the line where the source had a space) and decoration glyphs (the copy
+ * badge can sit mid-message once the TUI wraps it) both go.
+ */
+function collapse(text: string): string {
+  return text.replace(/[\s⎘•·△▽✕]/gu, "");
+}
+
+/** How many times `needle` appears in `haystack` (both already collapsed). */
+function occurrences(haystack: string, needle: string): number {
+  if (needle === "") return 0;
+  let count = 0;
+  let index = haystack.indexOf(needle);
+  while (index >= 0) {
+    count += 1;
+    index = haystack.indexOf(needle, index + needle.length);
+  }
+  return count;
 }

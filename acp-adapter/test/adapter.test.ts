@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { PassThrough, Readable, Writable } from "node:stream";
 import { ndJsonStream } from "@agentclientprotocol/sdk";
 import { createAdapter, type AdapterOptions } from "../src/adapter.ts";
-import { FakeClock, fakePaneFactory } from "./fake.ts";
+import { composerScreen, FakeClock, fakePaneFactory } from "./fake.ts";
 
 type Message = {
   jsonrpc?: string;
@@ -23,6 +23,9 @@ const DEFAULT_BRIDGE = {
   quiescenceMs: 300,
   echoTimeoutMs: 500,
   maxTurnMs: 20_000,
+  // Scripted screens carry a composer box, so readiness settles after
+  // READY_STABLE_CAPTURES polls rather than timing out.
+  startupTimeoutMs: 5_000,
 };
 
 /** Minimal in-test ACP client speaking raw NDJSON over two pipes. */
@@ -181,14 +184,15 @@ describe("ACP framing over stdio transport", () => {
     const pane = panes[0];
     pane.onSend = (keys) => {
       if (keys === "Enter") {
-        pane.screen = "freebuff ready\n> list the files";
+        pane.screen = composerScreen("freebuff ready", "> list the files");
       }
     };
+    // Output appears once the TUI has settled, so it is new text for the turn.
     clock.onAdvance = (time) => {
-      if (time >= 300 && time < 500) {
-        pane.screen = "freebuff ready\n> list the files\nfound 3 files";
-      } else if (time >= 500) {
-        pane.screen = "freebuff ready\n> list the files\nfound 3 files\n3 files listed";
+      if (time >= 600 && time < 900) {
+        pane.screen = composerScreen("freebuff ready", "> list the files", "found 3 files");
+      } else if (time >= 900) {
+        pane.screen = composerScreen("freebuff ready", "> list the files", "found 3 files", "3 files listed");
       }
     };
 
