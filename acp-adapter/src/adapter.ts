@@ -200,6 +200,12 @@ export function createAdapter(options: AdapterOptions): AgentApp {
       if (session.prompting) {
         throw new RequestError(-32000, "a prompt turn is already active for this session");
       }
+      // A load in flight has not replaced this state yet and is about to kill
+      // the very pane a turn would type into, so a prompt that arrives in that
+      // window has to be refused rather than aimed at a dying pane.
+      if (loading.has(params.sessionId)) {
+        throw new RequestError(-32000, `session '${params.sessionId}' is busy`);
+      }
       // Claim the session before awaiting anything, or two prompts that arrive
       // during a resume both pass the check above and are typed into the same
       // composer, arriving as one garbled message.
@@ -211,13 +217,11 @@ export function createAdapter(options: AdapterOptions): AgentApp {
         if (session.resuming !== undefined) {
           await session.resuming;
         }
-        let result: TurnResult;
-        try {
-          result = await runTurn({
-            pane: session.pane,
-            promptText: promptTextFromBlocks(params.prompt),
-            config,
-            events: {
+        const result: TurnResult = await runTurn({
+          pane: session.pane,
+          promptText: promptTextFromBlocks(params.prompt),
+          config,
+          events: {
             onChunk: (text) =>
               client.notify(methods.client.session.update, {
                 sessionId: params.sessionId,
@@ -228,13 +232,9 @@ export function createAdapter(options: AdapterOptions): AgentApp {
                 sessionId: params.sessionId,
                 update: noticeUpdate(notice),
               }),
-              isCancelled: () => session.cancelled || signal.aborted,
-            },
-          });
-        } catch (err) {
-          const detail = err instanceof Error ? err.message : String(err);
-          throw new RequestError(-32000, `the Freebuff pane could not take the prompt: ${detail}`);
-        }
+            isCancelled: () => session.cancelled || signal.aborted,
+          },
+        });
         // The chat title tracks the first prompt, so it changes during a turn:
         // record it once the turn is over so a later resume can find this chat.
         await recordSession(params.sessionId, session);
