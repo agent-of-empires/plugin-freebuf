@@ -6,7 +6,7 @@
 // line by line (common prefix/suffix trimming plus an LCS over the middle).
 // That covers the three shapes a terminal produces: rows appended at the
 // bottom, rows scrolled off the top, and a single row rewritten in place
-// (spinners, progress counters), and the last one must not re-emit the screen.
+// (spinners, progress counters) — the last one must not re-emit the screen.
 
 import { stripAnsi } from "./ansi.ts";
 
@@ -37,7 +37,7 @@ export function normalizeScreen(raw: string): string[] {
 
 /**
  * Top border of a bordered block, how Freebuff frames its boxes: `╭──────╮` for
-the transcript furniture, `┌──────┐` for the modals (chat picker, buttons).
+ * the transcript furniture, `┌──────┐` for the modals (chat picker, buttons).
  */
 const BOX_TOP = /^[ \t]*[╭┌]─*[╮┐][ \t]*$/;
 
@@ -86,8 +86,8 @@ export function chatTitle(raw: string): string | null {
   return null;
 }
 
-/** Header of the `/history` picker. */
-const HISTORY_HEADER = /Select a chat to resume/;
+/** Header of the `/history` picker, always drawn on a line of its own. */
+const HISTORY_HEADER = /^[ \t]*Select a chat to resume[ \t]*$/;
 
 /**
  * One row of the `/history` picker: `<age> <n> msgs <title> [×] <scrollbar>`.
@@ -103,18 +103,27 @@ const HISTORY_ROW = /^[\s│┃]*\S[^│┃]*?\s+(\d+)\s+msgs?\s+(.+)$/;
 const HISTORY_ROW_TRAILER = /[\s[\]×█▄▀│┃]+$/u;
 
 /**
- * The rest of the picker's furniture: its search field, its key hints and its
- * boxed rows. The header alone is not enough, since an agent can quote the
- * phrase `Select a chat to resume` in a message, and treating that as an open
- * picker would blank out a real transcript.
+ * The picker's search field and key hints. The header alone is not enough,
+ * since an agent can quote `Select a chat to resume` in a message and treating
+ * that as an open picker would blank out a real transcript.
  */
-const HISTORY_UI = [/Search chats/i, /Enter open chat/i, /Esc cancel/i, HISTORY_ROW];
+const HISTORY_UI = [/Search chats/i, /Enter open chat/i, /Esc cancel/i];
+
+/**
+ * A picker row as the TUI frames it: a `N msgs` row between the box borders.
+ * The borders are what tell a real row from a transcript line that happens to
+ * mention a count (`it took 3 msgs total`), which is why the row shape alone is
+ * not a picker marker.
+ */
+const HISTORY_BOX_ROW = /^[ \t]*│.*\d+[ \t]+msgs?\b.*│[ \t]*$/;
 
 /** True when the chat picker is open. */
 export function isChatHistoryScreen(raw: string): boolean {
-  const screen = stripAnsi(raw);
-  if (!HISTORY_HEADER.test(screen)) return false;
-  return HISTORY_UI.some((marker) => marker.test(screen));
+  const lines = stripAnsi(raw).split("\n");
+  // Standalone header first: a quoted copy sits inside a sentence.
+  if (!lines.some((line) => HISTORY_HEADER.test(line))) return false;
+  if (lines.some((line) => HISTORY_UI.some((marker) => marker.test(line)))) return true;
+  return lines.some((line) => HISTORY_BOX_ROW.test(line));
 }
 
 /** Titles listed by the open `/history` picker, most recent first. */
@@ -256,11 +265,12 @@ const CHROME_BOX_MARKERS: readonly RegExp[] = [OVERLAY_LABEL, AD_MARKER];
 /**
  * The badge Freebuff trails each message with (`⎘ • 6s • △▽`): glyphs, digits and
  * a unit. Its elapsed counter repaints, so as a trailing row it would stream as
- * whitespace-and-glyph noise. A row only counts as decoration when it carries
- * one of those glyph markers and no prose, so a bare numeric answer survives.
+ * whitespace-and-glyph noise. Only the badge's own glyphs count as a marker:
+ * the `•` and `·` bullets and the `✕` control are ordinary punctuation, and a
+ * bulleted list of numbers (`• 5%`, `• 10`) is content, not a badge.
  */
 const DECORATION_CHARS = /^[\s⎘•·△▽✕0-9sm%().,▄▀█]+$/;
-const DECORATION_MARKER = /[⎘•·△▽✕]/;
+const DECORATION_MARKER = /[⎘△▽]/;
 
 function isDecorationRow(line: string): boolean {
   return line.trim() !== "" && DECORATION_CHARS.test(line) && DECORATION_MARKER.test(line);

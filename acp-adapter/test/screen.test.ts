@@ -366,6 +366,41 @@ describe("chat identity and resume helpers", () => {
     assert.deepEqual(chatHistoryRows(picker), ["remember the word BANANA", "remember the word PLUM"]);
   });
 
+  it("detects a bare picker that has only the header and a boxed row", () => {
+    // No search field and no key hints: the row inside the box is the only
+    // structure there is, so the row shape has to be checked per line.
+    const picker = [
+      "                    Select a chat to resume",
+      "  ┌──────────────────────────────────────────────────┐",
+      "  │ 2m ago         3 msgs     remember the word PLUM │",
+      "  └──────────────────────────────────────────────────┘",
+    ].join("\n");
+    assert.equal(isChatHistoryScreen(picker), true);
+    assert.deepEqual(chatHistoryRows(picker), ["remember the word PLUM"]);
+  });
+
+  it("does not read a message that counts messages as the picker", () => {
+    // Both markers of the old detection are here: the header phrase and a line
+    // shaped like a picker row. Neither is picker furniture, and treating it as
+    // one blanked a real transcript.
+    const screen = [
+      "   [02:42 PM]",
+      "   see Select a chat to resume ⎘",
+      "",
+      "  more text",
+      "  it took 3 msgs total",
+    ].join("\n");
+    assert.equal(isChatHistoryScreen(screen), false);
+    const transcript = extractTranscript(screen).join("\n");
+    assert.ok(transcript.includes("it took 3 msgs total"), `dropped the message: ${JSON.stringify(transcript)}`);
+  });
+
+  it("keeps a bulleted list of bare numbers", () => {
+    // `•` is punctuation, not the badge: `⎘` and `△▽` are what mark one.
+    const screen = ["  answer", "  • 5%", "  • 10"].join("\n");
+    assert.deepEqual(extractTranscript(screen), ["  answer", "  • 5%", "  • 10"]);
+  });
+
   it("does not mistake a quoted picker phrase for an open picker", () => {
     // An agent can mention the picker in a message. Treating that as a modal
     // would blank out the whole transcript until the phrase scrolled away.
