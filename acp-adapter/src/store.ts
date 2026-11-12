@@ -8,7 +8,7 @@
 // next to the session id, and used to pick the right chat back out of
 // `/history` when a session is resumed.
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -72,7 +72,21 @@ export function fileSessionStore(dir: string = defaultStoreDir()): SessionStore 
         // Session ids and chat titles are private to the user: keep the
         // directory closed to other accounts instead of relying on the umask.
         mkdirSync(dir, { recursive: true, mode: 0o700 });
-        writeFileSync(recordPath(dir, sessionId), JSON.stringify(record), { mode: 0o600 });
+        // `mode` only applies to a directory this call creates, so a store
+        // directory left wider by an earlier version is tightened here too.
+        try {
+          chmodSync(dir, 0o700);
+        } catch {
+          // Not ours to chmod (a shared state dir, or another user's): the
+          // record itself is still written 0600 below.
+        }
+        const path = recordPath(dir, sessionId);
+        // Written aside and renamed over the record: a crash mid-write would
+        // otherwise leave truncated JSON, which reads back as if the session
+        // had never been recorded and would reopen the wrong chat.
+        const staged = `${path}.${process.pid}.tmp`;
+        writeFileSync(staged, JSON.stringify(record), { mode: 0o600 });
+        renameSync(staged, path);
       } catch {
         // Best-effort: see the doc comment above.
       }

@@ -8,7 +8,7 @@ import { PassThrough, Readable, Writable } from "node:stream";
 import { ndJsonStream } from "@agentclientprotocol/sdk";
 import { createAdapter, type AdapterOptions } from "../src/adapter.ts";
 import { memorySessionStore } from "../src/store.ts";
-import { composerScreen, FakeClock, fakePaneFactory } from "./fake.ts";
+import { composerScreen, FakeClock, FakePane, fakePaneFactory } from "./fake.ts";
 
 type Message = {
   jsonrpc?: string;
@@ -667,6 +667,61 @@ describe("session/load guards", () => {
     const first = await client.next((m) => m.id === 5);
     assert.equal(first.error, undefined);
     assert.equal(panes.length, 1, "both loads started a pane");
+  });
+
+  it("refuses a prompt that arrives while the load is creating its pane", async () => {
+    // Reloading a live session is the case that matters: its old state is still
+    // in the map and idle, and the load is about to kill the pane that state
+    // points at. A turn accepted in that window types into a dying pane and is
+    // then thrown away with it.
+    const title = "Remember the word PLUM. Reply with just: STORED";
+    const store = memorySessionStore();
+    let release: () => void = () => {};
+    let entered = false;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let creations = 0;
+    const { client, panes } = connectResumed({
+      screen: resumedScreen(title, title, "STORED"),
+      store,
+      gate: async () => {
+        // The first pane is `session/new`; hold the second one, the load's.
+        if (creations++ === 0) return;
+        entered = true;
+        await held;
+      },
+    });
+    await initialize(client);
+    const sessionId = await newSession(client, "/tmp/project");
+    store.set(sessionId, { cwd: "/tmp/project", title });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "session/load",
+      params: { sessionId, cwd: "/tmp/project", mcpServers: [] },
+    });
+    for (let i = 0; i < 200 && !entered; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.ok(entered, "the load never reached the pane factory");
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "session/prompt",
+      params: { sessionId, prompt: [{ type: "text", text: "too early" }] },
+    });
+    const early = await client.next((m) => m.id === 6);
+    assert.equal((early.error as { code: number }).code, -32000);
+    assert.match((early.error as { message: string }).message, /busy/);
+
+    release();
+    const load = await client.next((m) => m.id === 5);
+    assert.equal(load.error, undefined);
+    const typed = panes.flatMap((pane) => pane.sent.map((entry) => entry.keys));
+    assert.ok(!typed.includes("too early"), "the refused prompt reached a composer");
   });
 
   it("fails the load when the recorded chat is not the one that opened", async () => {
