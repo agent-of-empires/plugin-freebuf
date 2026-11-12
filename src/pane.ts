@@ -122,6 +122,9 @@ const CHROME_ROW = /^[ \t]*[│╭╮╰╯─┌┐└┘]*[ \t]*$/;
 /** How far above the prompt the status line may sit; the input box is a few rows tall. */
 const MAX_CHROME_ROWS = 12;
 
+/** The border that closes a boxed panel, `╰────╯`. */
+const BOX_BOTTOM = /^[ \t]*╰─+╯[ \t]*$/;
+
 /**
  * The frame a dialog replaces: the composer's box, or the panel drawn over it
  * when a message is queued mid-turn. Only these full-width frames count -- a
@@ -144,13 +147,22 @@ function isComposerFrame(row: string): boolean {
 function bottomDialog(lines: readonly string[]): string | null {
   for (let close = lines.length - 1; close >= 0; close -= 1) {
     if (!DIALOG_CLOSE_ROW.test(lines[close])) continue;
-    // Bottom-most close row wins, and a composer under it means it was output.
-    if (lines.slice(close + 1).some(isComposerFrame)) return null;
+    // A body row can repeat the same words, so only a close row with a caption
+    // over it opens a dialog; anything else keeps the scan going upward.
+    let caption: string | null = null;
     for (let top = close - 1; top >= Math.max(0, close - DIALOG_CAPTION_ROWS); top -= 1) {
-      const caption = DIALOG_TOP.exec(lines[top]);
-      if (caption !== null) return caption[1];
+      const found = DIALOG_TOP.exec(lines[top]);
+      if (found !== null) {
+        caption = found[1];
+        break;
+      }
     }
-    return null; // a close row with no caption over it is not a dialog we know
+    if (caption === null) continue;
+    // What follows the box is chrome: the dialog's own body ends at its closing
+    // border, so a body row is never mistaken for the composer underneath.
+    const bottom = lines.findIndex((row, index) => index > close && BOX_BOTTOM.test(row));
+    if (lines.slice((bottom === -1 ? close : bottom) + 1).some(isComposerFrame)) return null;
+    return caption;
   }
   return null;
 }

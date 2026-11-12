@@ -100,6 +100,32 @@ describe("pane classification", () => {
     expect(classifyPane(ERROR_PANE)).toBe("error");
   });
 
+  it("reads a question dialog whose body echoes the queued-message panel", () => {
+    // The phrase in a question's body is text, not the panel: it sits inside the
+    // box, above the border that closes it, so the dialog still blocks.
+    const echoing = [
+      "╭──────────────────────────────── Some questions for you ────────────────────────────────╮",
+      "│                                                                                 Close ✕ │",
+      "│ ▼ Quoted from the composer:                                                             │",
+      "│   Your message is saved and will send after the current turn                            │",
+      "╰─────────────────────────────────────────────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(echoing)).toBe("waiting");
+  });
+
+  it("reads a question dialog whose body mentions clicking Close", () => {
+    // A body row can carry the close words too; only the row under the caption
+    // is the real one, and the scan keeps looking rather than giving up on it.
+    const mentioning = [
+      "╭──────────────────────────────── Some questions for you ────────────────────────────────╮",
+      "│                                                                                 Close ✕ │",
+      "│ ▼ How should the dialog be dismissed?                                                   │",
+      "│   Click Close ✕ in the top right, or press Esc                                          │",
+      "╰─────────────────────────────────────────────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(mentioning)).toBe("waiting");
+  });
+
   it("never takes a confirmation phrase in the transcript for a block", () => {
     // Only a dialog's caption counts: prose, a quoted prompt or tool output can
     // say "(y/n)" or "Do you want to proceed" without anything being asked.
