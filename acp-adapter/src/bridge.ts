@@ -15,11 +15,15 @@
 import type { StopReason } from "@agentclientprotocol/sdk";
 import {
   ScreenTracker,
+  chatHistoryRows,
+  chatTitle,
   diffScreens,
   extractTranscript,
+  isChatHistoryScreen,
   isPromptVisible,
   isWorkingScreen,
   normalizeScreen,
+  splitTranscriptMessages,
 } from "./screen.ts";
 import type { PaneSource } from "./pane.ts";
 
@@ -306,6 +310,118 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
   // The pane never went quiet (or never changed at all): report the turn as
   // finished rather than hanging the client forever.
   return { stopReason: "end_turn", streamedChars };
+}
+
+export type ResumeResult = {
+  /** True when the pane is showing the chat that was asked for. */
+  restored: boolean;
+  /** Title of the chat the pane now has open, when it shows one. */
+  title: string | null;
+  /** The restored conversation, as messages a host can replay. */
+  messages: { role: "user" | "agent"; text: string }[];
+};
+
+/** How long to wait for the `/history` picker to open, list rows, and close. */
+export const RESUME_PICKER_TIMEOUT_MS = 15_000;
+
+export type ResumeRequest = {
+  pane: PaneSource;
+  config: BridgeConfig;
+  /** Title recorded for this session; the chat is picked back out by it. */
+  title: string;
+};
+
+/**
+ * Reopens a conversation in a freshly started pane and reports what it shows.
+ *
+ * `session/new` with `--continue` reopens the working directory's most recent
+ * chat, which is usually the right one but not always: a directory can hold
+ * several chats. When the recorded title does not match what came up, the TUI's
+ * own `/history` picker is used to select the recorded chat instead.
+ */
+export async function resumeChat(request: ResumeRequest): Promise<ResumeResult> {
+  const { pane, config, title: expected } = request;
+  if ((await waitForReady(pane, config, () => false)) === "timeout") {
+    throw new Error(NOT_READY);
+  }
+
+  let screen = await pane.capture();
+  let title = chatTitle(screen);
+  if (titleMatches(title, expected)) {
+    return { restored: true, title, messages: resumedMessages(screen) };
+  }
+
+  // Pick the chat out of the TUI's history list instead.
+  await pane.send("/history", { literal: true });
+  await pane.send(SUBMIT_KEY);
+  const deadline = config.now() + RESUME_PICKER_TIMEOUT_MS;
+  let rows: string[] = [];
+  while (config.now() < deadline) {
+    const listing = await pane.capture();
+    if (isChatHistoryScreen(listing)) {
+      rows = chatHistoryRows(listing);
+      if (rows.length > 0) break;
+    }
+    await config.sleep(config.pollIntervalMs);
+  }
+
+  const index = historyRowIndex(rows, expected);
+  if (index < 0) {
+    // Nothing matched: close the picker and keep whatever chat is open.
+    await pane.send("Escape");
+    return { restored: false, title: chatTitle(screen), messages: resumedMessages(screen) };
+  }
+  for (let i = 0; i < index; i++) {
+    await pane.send("Down");
+  }
+  await pane.send(SUBMIT_KEY);
+  if ((await waitForReady(pane, config, () => false)) === "timeout") {
+    throw new Error(NOT_READY);
+  }
+  screen = await pane.capture();
+  title = chatTitle(screen);
+  return { restored: titleMatches(title, expected), title, messages: resumedMessages(screen) };
+}
+
+/**
+ * Compares a chat title from the TUI with a recorded one.
+ *
+ * The picker truncates long titles to its column width, so there a prefix
+ * counts as a match. The footer has room for the whole title, so comparing it
+ * as a prefix would accept a different chat whose name merely starts the same
+ * way (`Fix tests` vs `Fix tests on macOS`) and replay its conversation.
+ */
+function titleMatches(actual: string | null, expected: string): boolean {
+  if (actual === null) return false;
+  const a = actual.trim();
+  const b = expected.trim();
+  if (a === "" || b === "") return false;
+  return a === b;
+}
+
+/**
+ * Index of the history row naming the requested chat, or -1.
+ *
+ * A row can be truncated to the picker's width, so a prefix counts as a match
+ * too, but only when exactly one row matches: with `Fix tests` recorded, rows
+ * for `Fix tests` and `Fix tests on macOS` must not resolve to the wrong one.
+ */
+function historyRowIndex(rows: string[], expected: string): number {
+  const want = expected.trim();
+  const exact = rows.findIndex((row) => row.trim() === want);
+  if (exact >= 0) return exact;
+  const matches: number[] = [];
+  rows.forEach((row, index) => {
+    const text = row.trim();
+    if (text !== "" && (text.startsWith(want) || want.startsWith(text))) {
+      matches.push(index);
+    }
+  });
+  return matches.length === 1 ? matches[0] : -1;
+}
+
+function resumedMessages(screen: string): { role: "user" | "agent"; text: string }[] {
+  return splitTranscriptMessages(extractTranscript(screen));
 }
 
 /** Why the wait for a usable TUI ended. */

@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   findPermissionPrompt,
+  resumeChat,
   runTurn,
   type BridgeConfig,
   type TurnNotice,
@@ -560,6 +561,126 @@ describe("echo handling", () => {
     const streamed = sink.chunks.join("\n");
     assert.equal(streamed.includes(repeated), false, "repeat echo leaked as output");
     assert.ok(streamed.includes("still green"));
+  });
+});
+
+describe("resumeChat", () => {
+  /** The settled screen of a pane whose footer names `title` as the open chat. */
+  const withFooter = (title: string): string =>
+    [
+      "  freebuff",
+      "",
+      "╭──────────────────────────────╮",
+      "│  ▍Enter a coding task        │",
+      "╰──────────────────────────────╯",
+      ` DeepSeek V4.1 Flash Slow · /tmp · Chat: ${title}`,
+      " ← for history · ? for help",
+    ].join("\n");
+
+  /** A pane showing one chat, scripted so `/history` opens the picker. */
+  function scriptedPane(footerTitle: string, rows: string[]): { pane: FakePane; clock: FakeClock; sent: string[] } {
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, withFooter(footerTitle));
+    let picker = false;
+    pane.onSend = (keys) => {
+      if (keys === "/history") {
+        picker = true;
+        return;
+      }
+      if (keys !== "Enter") return;
+      if (picker) {
+        picker = false;
+        pane.screen = [
+          "                            Select a chat to resume",
+          "  ▍Search chats...",
+          "  ╭─────────────────────────────────────────────────────╮",
+          ...rows.map((row) => `  │ ${row} │`),
+          "  ╰─────────────────────────────────────────────────────╯",
+          "  ↑↓ navigate · → / Enter open chat · Esc cancel",
+        ].join("\n");
+        return;
+      }
+      if (pane.screen.includes("Select a chat")) {
+        const title = rows[0].split("msgs")[1].trim();
+        pane.screen = withFooter(title);
+      }
+    };
+    return { pane, clock, sent: [] };
+  }
+
+  /** Serves the picker, tracking arrow-key navigation to the opened row. */
+  function pickerPane(footerTitle: string, rows: string[]): { pane: FakePane; opened: () => string } {
+    const pane = new FakePane(meta, withFooter(footerTitle));
+    let picker = false;
+    let selected = 0;
+    pane.onSend = (keys) => {
+      if (keys === "/history") {
+        picker = true;
+        return;
+      }
+      if (keys === "Down") {
+        selected += 1;
+        return;
+      }
+      if (keys !== "Enter") return;
+      if (picker) {
+        picker = false;
+        pane.screen = [
+          "                            Select a chat to resume",
+          "  ▍Search chats...",
+          "  ╭─────────────────────────────────────────────────────╮",
+          ...rows.map((row) => `  │ ${row} │`),
+          "  ╰─────────────────────────────────────────────────────╯",
+          "  ↑↓ navigate · → / Enter open chat · Esc cancel",
+        ].join("\n");
+        return;
+      }
+      if (pane.screen.includes("Select a chat")) {
+        pane.screen = withFooter(rows[selected].split("msgs")[1].trim());
+      }
+    };
+    return { pane, opened: () => rows[selected].split("msgs")[1].trim() };
+  }
+
+  it("prefers the exactly named row over a longer one sharing its prefix", async () => {
+    const clock = new FakeClock();
+    const { pane } = pickerPane("Fix tests on macOS", ["1m ago   3 msgs   Fix tests on macOS", "5m ago   3 msgs   Fix tests"]);
+    const result = await resumeChat({ pane, config: testConfig(clock), title: "Fix tests" });
+
+    assert.deepEqual(
+      pane.sent.map((entry) => entry.keys),
+      ["/history", "Enter", "Down", "Enter"],
+      "the picker did not step past the longer row to the exact one",
+    );
+    assert.equal(result.restored, true);
+    assert.equal(result.title, "Fix tests");
+  });
+
+  it("does not guess between two rows that both match a prefix", async () => {
+    // Both could be the recorded chat, and picking one replays a conversation
+    // the host never asked for, so the load has to fail instead.
+    const clock = new FakeClock();
+    const { pane } = pickerPane("Fix tests on macOS", ["1m ago   3 msgs   Fix tests on macOS", "5m ago   3 msgs   Fix tests on Linux"]);
+    const result = await resumeChat({ pane, config: testConfig(clock), title: "Fix tests" });
+
+    assert.equal(result.restored, false);
+    assert.ok(pane.sent.some((entry) => entry.keys === "Escape"), "the picker was left open");
+  });
+
+  it("does not accept a footer title that only starts the same way", async () => {
+    // `--continue` opened a different chat whose name shares a prefix: taking
+    // that as a match would replay the wrong conversation.
+    const { pane, clock } = scriptedPane("Fix tests on macOS", ["just now   3 msgs   Fix tests"]);
+    const result = await resumeChat({
+      pane,
+      config: testConfig(clock),
+      title: "Fix tests",
+    });
+
+    const keys = pane.sent.map((entry) => entry.keys);
+    assert.deepEqual(keys.slice(0, 2), ["/history", "Enter"], "the picker was never opened");
+    assert.equal(result.restored, true);
+    assert.equal(result.title, "Fix tests");
   });
 });
 
