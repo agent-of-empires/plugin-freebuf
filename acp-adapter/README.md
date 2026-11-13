@@ -58,7 +58,10 @@ Scripts: `npm test` (node's built-in test runner), `npm run typecheck`.
 1. `session/new` spawns `freebuff --cwd <cwd>` in a tmux session named after
    the ACP session id and returns that id.
 2. `session/prompt` sends the prompt as **literal** keys (`send-keys -l`, so a
-   prompt containing `Enter` is not interpreted as a keypress), then `Enter`.
+   prompt containing `Enter` is not interpreted as a keypress), waits out the
+   TUI's paste window, then presses `Enter`. If the pane does not react, the
+   press is retried (up to three), because a swallowed `Enter` otherwise leaves
+   the prompt typed in the composer with no turn running.
 3. It waits for the TUI to echo the prompt and resets its diff baseline, so
    the user's own text is never streamed back as assistant output.
 4. It polls `tmux capture-pane -p -e`, strips ANSI escapes, diffs the
@@ -77,6 +80,7 @@ Bridge timing (override via `createAdapter({ bridge })`):
 | `quiescenceMs`    | `2000`   | Quiet window that ends the turn             |
 | `echoTimeoutMs`   | `2000`   | How long to wait for the prompt echo        |
 | `maxTurnMs`       | `300000` | Hard cap for a whole turn                   |
+| `submitDelayMs`   | `150`    | Pause before `Enter`, so it is not read as paste |
 
 ## Limitations of a TUI bridge
 
