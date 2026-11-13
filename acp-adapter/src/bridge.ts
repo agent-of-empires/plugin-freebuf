@@ -237,6 +237,14 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
   // long prompt can take longer to reach the transcript than the initial window
   // and the echo would otherwise be streamed back as assistant output.
   let echoPending = echoLines.length > 0;
+  // The echo has arrived, possibly with the answer's first rows drawn below it:
+  // rebase the tracker on this screen so the user's own message is not streamed
+  // back, and stream what came after it rather than losing it.
+  const settleEcho = async (screen: string, after: string[]): Promise<void> => {
+    tracker.reset(screen);
+    echoPending = false;
+    await deliver(after.join("\n"));
+  };
   const echoDeadline = config.now() + config.echoTimeoutMs;
   while (echoPending && config.now() < echoDeadline) {
     if (events.isCancelled()) {
@@ -245,9 +253,7 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
     const screen = await pane.capture();
     const after = rowsAfterEcho(screen);
     if (after !== null) {
-      tracker.reset(screen);
-      echoPending = false;
-      await deliver(after.join("\n"));
+      await settleEcho(screen, after);
       break;
     }
     await config.sleep(config.pollIntervalMs);
@@ -264,12 +270,8 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
     const screen = await pane.capture();
     const afterEcho = echoPending ? rowsAfterEcho(screen) : null;
     if (afterEcho !== null) {
-      // The echo arrived late, possibly with the answer's first rows drawn
-      // below it: rebase on the screen so the user's own message is not
-      // streamed back, but stream what came after it rather than losing it.
-      tracker.reset(screen);
-      echoPending = false;
-      await deliver(afterEcho.join("\n"));
+      // The echo arrived after the initial window closed.
+      await settleEcho(screen, afterEcho);
       await config.sleep(config.pollIntervalMs);
       continue;
     }
