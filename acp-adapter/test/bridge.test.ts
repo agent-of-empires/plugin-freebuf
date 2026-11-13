@@ -251,12 +251,15 @@ describe("runTurn", () => {
 
   it("keeps the turn open while the status line says it is working", async () => {
     // The transcript can sit unchanged for longer than the quiescence window
-    // while the agent is still thinking; only the status line knows.
-    const working = (status: string, answer?: string) =>
+    // while the agent is still thinking; only the status line knows. The answer
+    // starts before the pause on purpose: without a streamed chunk the echo
+    // suppression alone keeps quiescence from ending the turn, and the test
+    // would pass even with the status-line guard removed.
+    const working = (status: string, answer: string[]) =>
       [
         "   my prompt",
         "",
-        ...(answer === undefined ? [] : [`  ${answer}`, ""]),
+        ...answer,
         status,
         "╭──────────────────╮",
         "│  ▍Add a task     │",
@@ -267,10 +270,12 @@ describe("runTurn", () => {
     const pane = new FakePane(meta, READY_SCREEN);
     const sink = collect();
     pane.onSend = (keys) => {
-      if (keys === "Enter") pane.screen = working(" thinking...   ■ Esc");
+      if (keys === "Enter") pane.screen = working(" thinking...   ■ Esc", ["  the first part"]);
     };
     clock.onAdvance = (time) => {
-      if (time >= 2_000) pane.screen = working(" 24.8K (19%)   ✕ End session", "the answer");
+      if (time >= 2_000) {
+        pane.screen = working(" 24.8K (19%)   ✕ End session", ["  the first part", "  the rest"]);
+      }
     };
 
     const result = await runTurn({
@@ -285,7 +290,7 @@ describe("runTurn", () => {
       clock.time >= 2_000,
       `turn ended at ${clock.time}ms, before the agent stopped working`,
     );
-    assert.ok(sink.chunks.join("\n").includes("the answer"));
+    assert.ok(sink.chunks.join("\n").includes("the rest"), "the paused answer was dropped");
     // The status line and input box are chrome: they must never be streamed.
     assert.equal(sink.chunks.join("\n").includes("■ Esc"), false);
     assert.equal(sink.chunks.join("\n").includes("Add a task"), false);
@@ -383,6 +388,82 @@ describe("echo handling", () => {
     const streamed = sink.chunks.join("\n");
     assert.equal(streamed.includes("summarise the failing tests"), false, "wrapped echo leaked as output");
     assert.ok(streamed.includes("three tests broke"));
+  });
+
+  it("suppresses every line of a multi-line prompt echo", async () => {
+    // The needle was the first line only, so the rest of a multi-line prompt was
+    // delivered as assistant text once the echo was found.
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, composerScreen("boot"));
+    const sink = collect();
+    pane.onSend = (keys) => {
+      if (keys === "Enter") {
+        pane.screen = composerScreen(
+          "boot",
+          "   [03:52 PM] ⎘",
+          "   Review this:",
+          "   const value = 1;",
+        );
+      }
+    };
+    clock.onAdvance = (time) => {
+      if (time >= 600) {
+        pane.screen = composerScreen(
+          "boot",
+          "   [03:52 PM] ⎘",
+          "   Review this:",
+          "   const value = 1;",
+          "",
+          "  the value is one",
+        );
+      }
+    };
+
+    await runTurn({
+      pane,
+      promptText: "Review this:\nconst value = 1;",
+      config: testConfig(clock),
+      events: sink.events,
+    });
+
+    const streamed = sink.chunks.join("\n");
+    assert.equal(streamed.includes("Review this:"), false, "echo leaked as output");
+    assert.equal(streamed.includes("const value = 1;"), false, "second prompt line leaked");
+    assert.ok(streamed.includes("the value is one"));
+  });
+
+  it("keeps the answer drawn below the last line of a multi-line echo", async () => {
+    // The echo and the answer arrive in one capture, so the boundary has to be
+    // the end of the whole prompt rather than the end of its first line.
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, composerScreen("boot"));
+    const sink = collect();
+    pane.onSend = (keys) => {
+      if (keys === "Enter") {
+        pane.screen = composerScreen(
+          "boot",
+          "   [03:52 PM] ⎘",
+          "   explain the count",
+          "   and the exit code",
+          "",
+          "  the count is one",
+          "  the exit code is zero",
+        );
+      }
+    };
+
+    await runTurn({
+      pane,
+      promptText: "explain the count\nand the exit code",
+      config: testConfig(clock),
+      events: sink.events,
+    });
+
+    const streamed = sink.chunks.join("\n");
+    assert.equal(streamed.includes("explain the count"), false, "echo leaked as output");
+    assert.equal(streamed.includes("and the exit code"), false, "second prompt line leaked");
+    assert.ok(streamed.includes("the count is one"), "first answer row was dropped");
+    assert.ok(streamed.includes("the exit code is zero"), "answer row was dropped");
   });
 
   it("suppresses the echo of a prompt whose first line is blank", async () => {
