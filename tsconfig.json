@@ -3,13 +3,14 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "outDir": "dist",
+    "outDir": ".aoe-build/dist",
     "rootDir": "src",
     "strict": true,
     "declaration": true,
     "sourceMap": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
+    "typeRoots": ["./.aoe-build/node_modules/@types"],
     "forceConsistentCasingInFileNames": true
   },
   "include": ["src"]
