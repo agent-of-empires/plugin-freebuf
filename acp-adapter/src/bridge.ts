@@ -6,7 +6,7 @@
 //      is dropped), then snapshot the screen as the diff baseline,
 //   2. type the prompt, send Enter, and wait for the user's message to reach the
 //      transcript so that copy is dropped from the diff,
-//   3. poll the pane, streaming every newly appended bit of *transcript* text --
+//   3. poll the pane, streaming every newly appended bit of *transcript* text:
 //      the TUI's own chrome (input box, status line, ads, footer) is cut out,
 //   4. finish with `end_turn` once the transcript has been quiet for
 //      `quiescenceMs` and the status line no longer says the agent is working,
@@ -15,6 +15,7 @@
 import type { StopReason } from "@agentclientprotocol/sdk";
 import {
   ScreenTracker,
+  diffScreens,
   extractTranscript,
   isPromptVisible,
   isWorkingScreen,
@@ -137,7 +138,23 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
   if (events.isCancelled()) {
     return { stopReason: "cancelled", streamedChars };
   }
+  const baselineRows = extractTranscript(baseline);
   const tracker = new ScreenTracker(baseline);
+
+  let sawChange = false;
+  let lastChangeAt = config.now();
+  let firstChunk = true;
+  const deliver = async (text: string): Promise<void> => {
+    // New screen lines carry a leading newline for reconstruction; the very
+    // first chunk has nothing before it, so drop the separator.
+    const out = firstChunk && text.startsWith("\n") ? text.slice(1) : text;
+    if (out === "") return;
+    firstChunk = false;
+    sawChange = true;
+    lastChangeAt = config.now();
+    await events.onChunk(out);
+    streamedChars += out.length;
+  };
 
   // Type the prompt as literal text, then submit it. The literal flag matters:
   // unquoted tmux send-keys would read words such as "Enter" inside the prompt
@@ -151,17 +168,35 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
   // the user's message only reaches the transcript on submit, which is the copy
   // that must be suppressed. If no echo ever appears, the original baseline is
   // kept and nothing is skipped.
-  const promptNeedle = promptText.split("\n")[0].trim();
+  // The first non-empty line, since a prompt may start with a blank line and an
+  // empty needle suppresses nothing: the user's message would stream back as
+  // assistant output.
+  const promptNeedle = promptText
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line !== "") ?? "";
   // The TUI wraps a long prompt over several rows, so the echo has to be found
   // in whitespace-collapsed text: the needle is one source line and never
   // matches the rows as they are drawn.
   const echoNeedle = collapse(promptNeedle);
-  // A prompt the user has sent before is already in the transcript, so finding
-  // the needle is not enough: the echo is the one occurrence past the baseline.
-  const baselineEchoes = echoNeedle === "" ? 0 : occurrences(collapse(transcriptText(baseline)), echoNeedle);
-  const echoed = (screen: string): boolean => {
-    if (echoNeedle === "") return false;
-    return occurrences(collapse(transcriptText(screen)), echoNeedle) > baselineEchoes;
+  // The rows drawn since the baseline, which is where the echo has to appear. A
+  // count over the whole transcript would miss it whenever an older copy of the
+  // same prompt scrolled off the top as the new one was drawn.
+  const rowsSinceBaseline = (screen: string): string[] => {
+    const delta = diffScreens(baselineRows, extractTranscript(screen));
+    return delta === "" ? [] : delta.split("\n");
+  };
+  // Null while no new row carries the needle; otherwise the rows after the echo
+  // (an answer can be drawn in the same capture, and it has to be streamed).
+  const rowsAfterEcho = (screen: string): string[] | null => {
+    if (echoNeedle === "") return null;
+    const rows = rowsSinceBaseline(screen);
+    let seen = "";
+    for (let i = 0; i < rows.length; i++) {
+      seen += collapse(rows[i]);
+      if (seen.includes(echoNeedle)) return rows.slice(i + 1);
+    }
+    return null;
   };
   // Still waiting for the echo: the main loop keeps watching for it, because a
   // long prompt can take longer to reach the transcript than the initial window
@@ -173,19 +208,18 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
       break;
     }
     const screen = await pane.capture();
-    if (echoed(screen)) {
+    const after = rowsAfterEcho(screen);
+    if (after !== null) {
       tracker.reset(screen);
       echoPending = false;
+      await deliver(after.join("\n"));
       break;
     }
     await config.sleep(config.pollIntervalMs);
   }
 
   const deadline = config.now() + config.maxTurnMs;
-  let sawChange = false;
-  let lastChangeAt = config.now();
   let permissionNoticed = false;
-  let firstChunk = true;
 
   while (config.now() < deadline) {
     if (events.isCancelled()) {
@@ -193,30 +227,24 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
     }
 
     const screen = await pane.capture();
-    if (echoPending && echoed(screen)) {
-      // The echo arrived late: rebase on it instead of streaming the user's own
-      // message back as assistant output.
+    const afterEcho = echoPending ? rowsAfterEcho(screen) : null;
+    if (afterEcho !== null) {
+      // The echo arrived late, possibly with the answer's first rows drawn
+      // below it: rebase on the screen so the user's own message is not
+      // streamed back, but stream what came after it rather than losing it.
       tracker.reset(screen);
       echoPending = false;
+      await deliver(afterEcho.join("\n"));
       await config.sleep(config.pollIntervalMs);
       continue;
     }
-    const delta = tracker.update(screen);
-    if (delta !== "") {
-      // New screen lines carry a leading newline for reconstruction; the very
-      // first one has nothing before it, so drop the separator.
-      const text = firstChunk && delta.startsWith("\n") ? delta.slice(1) : delta;
-      if (text !== "") {
-        firstChunk = false;
-        sawChange = true;
-        lastChangeAt = config.now();
-        await events.onChunk(text);
-        streamedChars += text.length;
-      }
-    }
+    await deliver(tracker.update(screen));
 
     if (!permissionNoticed) {
-      const pattern = findPermissionPrompt(transcriptText(screen));
+      // The whole normalized screen, not just the transcript: a modal can be
+      // drawn as a bordered box in the bottom chrome, which the transcript cut
+      // removes, and then the prompt would be missed.
+      const pattern = findPermissionPrompt(normalizeScreen(screen).join("\n"));
       if (pattern !== null) {
         permissionNoticed = true;
         await events.onNotice({
@@ -271,21 +299,22 @@ async function waitForReady(
     const screen = await pane.capture();
     if (isCancelled()) return "cancelled";
     const ready = isPromptVisible(normalizeScreen(screen));
-    if (ready && previous !== null && screen === previous) {
-      stable += 1;
+    // Compare the transcript, not the raw capture: the footer, the rotating ad
+    // box and the status line repaint constantly, and one changed byte there
+    // would reset the count forever.
+    const settled = extractTranscript(screen).join("\n");
+    if (ready) {
+      // The first ready capture counts as one, so three captures at a settled
+      // composer are enough instead of four.
+      stable = previous !== null && settled === previous ? stable + 1 : 1;
       if (stable >= READY_STABLE_CAPTURES) return "ready";
     } else {
       stable = 0;
     }
-    previous = screen;
+    previous = settled;
     if (config.now() >= deadline) return "timeout";
     await config.sleep(config.pollIntervalMs);
   }
-}
-
-/** The transcript text of a raw capture, joined for substring matching. */
-function transcriptText(raw: string): string {
-  return extractTranscript(raw).join("\n");
 }
 
 /**
@@ -295,16 +324,4 @@ function transcriptText(raw: string): string {
  */
 function collapse(text: string): string {
   return text.replace(/[\s⎘•·△▽✕]/gu, "");
-}
-
-/** How many times `needle` appears in `haystack` (both already collapsed). */
-function occurrences(haystack: string, needle: string): number {
-  if (needle === "") return 0;
-  let count = 0;
-  let index = haystack.indexOf(needle);
-  while (index >= 0) {
-    count += 1;
-    index = haystack.indexOf(needle, index + needle.length);
-  }
-  return count;
 }
