@@ -116,6 +116,12 @@ describe("pane classification", () => {
     expect(classifyPane(printed.replace(" working...  1m 31s   ■ Esc\n", ""))).toBe("idle");
   });
 
+  it("reads a dialog whose body echoes the queued-message panel", () => {
+    // The phrase is dialog text, not the panel: it sits inside the box.
+    const body = "╭─── Some questions for you ───╮\n│ Close ✕ │\n│ Your message is saved │";
+    expect(classifyPane(`${body}\n╰──────────────────────────────╯`)).toBe("waiting");
+  });
+
   it("prefers a dialog over the working line it was drawn across", () => {
     expect(classifyPane(`${RUNNING_PANE}\n${WAITING_PANE}`)).toBe("waiting");
   });

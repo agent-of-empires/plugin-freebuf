@@ -155,9 +155,13 @@ export function stripAnsi(text: string): string {
   return text.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
 }
 
-/** The frame a dialog replaces: the composer's box, or the queued-message panel. */
-function isComposerFrame(row: string): boolean {
-  return INPUT_BOX_TOP.test(row) || QUEUED_MESSAGE.test(row);
+/** The border that closes a boxed panel, `╰────╯`. */
+const BOX_BOTTOM = /^[ \t]*╰─+╯[ \t]*$/;
+
+/** The composer a dialog would have replaced: prompt, input box, queued panel. */
+function isComposerFrame(lines: readonly string[], index: number): boolean {
+  const row = lines[index];
+  return PROMPT_LINE.test(row) || INPUT_BOX_TOP.test(row) || isQueuedPanel(lines, index);
 }
 
 /**
@@ -176,8 +180,13 @@ function bottomDialog(lines: readonly string[]): string | null {
     for (let top = close - 1; top >= Math.max(0, close - DIALOG_CAPTION_ROWS); top -= 1) {
       const found = DIALOG_TOP.exec(lines[top]);
       if (found === null) continue;
-      if (!lines.slice(close + 1).some(isComposerFrame)) return found[1];
-      break;
+      // Only rows under the dialog's own closing border can hold a composer;
+      // its body would otherwise read as one. A cut-off dialog has none.
+      const bottom = lines.findIndex((row, index) => index > close && BOX_BOTTOM.test(row));
+      for (let below = bottom + 1; below < lines.length; below += 1) {
+        if (isComposerFrame(lines, below)) return null;
+      }
+      return found[1];
     }
   }
   return null;
