@@ -27,4 +27,4 @@ execFileSync(`npm${suffix}`, ["install", "--prefix", build, "--no-audit", "--no-
 });
 
 const tsc = resolve(build, "node_modules", ".bin", `tsc${suffix}`);
-execFileSync(tsc, ["-p", resolve(root, "tsconfig.json")], { cwd: root, stdio: "inherit" });
+execFileSync(tsc, ["-p", resolve(root, "tsconfig.build.json")], { cwd: root, stdio: "inherit" });

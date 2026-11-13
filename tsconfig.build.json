@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": ".aoe-build/dist",
+    "typeRoots": ["./.aoe-build/node_modules/@types"]
+  }
+}
