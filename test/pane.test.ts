@@ -59,6 +59,42 @@ describe("pane classification", () => {
     ).toBe("running");
   });
 
+  it("reads a working pane whose composer holds a queued message as running", () => {
+    // Captured live: typing while the turn runs replaces the composer with this
+    // panel, so the status line anchors on the panel instead of the prompt box.
+    expect(
+      classifyPane(
+        [
+          " working...              55m 23s   ■ Esc",
+          "┌───────────────────────────────────────┐",
+          "│ Your message is saved and will send   │",
+          "│ after the current turn.               │",
+          "│ Enter: change       Esc: back to draft│",
+          "│ model                                 │",
+          "└───────────────────────────────────────┘",
+          " DeepSeek V4.1 Flash Slow · ~/code/x · /model to change",
+          " ← for history · ? for help",
+        ].join("\n"),
+      ),
+    ).toBe("running");
+  });
+
+  it("ignores the queued-message phrase quoted in the transcript", () => {
+    // The words alone are prose: the panel is what has its square border over it.
+    // The composer below keeps the row in range, so the guard is what decides.
+    expect(
+      classifyPane(
+        [
+          " working...  2m 10s   ■ Esc",
+          '│ The panel reads "Your message is saved" while a turn runs │',
+          "╭───────────────────────────────────╮",
+          "│  ▍Add to the current task         │",
+          "╰───────────────────────────────────╯",
+        ].join("\n"),
+      ),
+    ).toBe("idle");
+  });
+
   it("reads a parked prompt with no status line as idle", () => {
     expect(classifyPane(IDLE_PANE)).toBe("idle");
   });
