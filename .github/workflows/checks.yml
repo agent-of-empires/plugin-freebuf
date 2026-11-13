@@ -36,3 +36,20 @@ jobs:
       - run: npm run lint
       - run: npm run build
       - run: npm test
+
+  host-build:
+    name: Build output stays under .aoe-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # The host re-hashes the installed tree at load and only excludes
+      # .aoe-build/, so a build step that writes anywhere else silently drops the
+      # plugin to community trust. test/build-output.test.ts runs the manifest's
+      # build steps and asserts the hash is unchanged.
+      - run: npm install
+      - run: npx vitest run test/build-output.test.ts
