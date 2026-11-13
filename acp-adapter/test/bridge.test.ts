@@ -636,6 +636,35 @@ describe("resumeChat", () => {
     assert.ok(pane.sent.some((entry) => entry.keys === "Escape"), "the picker was left open");
   });
 
+  it("does not open a shorter chat that only starts the recorded title", async () => {
+    // The recorded chat is gone, leaving one row that shares its first word: it
+    // is a different conversation, and opening it replays the wrong one.
+    const clock = new FakeClock();
+    const { pane, opened } = pickerPane("Fix", ["just now   3 msgs   Fix"]);
+    const result = await resumeChat({ pane, config: testConfig(clock), title: "Fix tests" });
+
+    assert.deepEqual(pane.sent.map((entry) => entry.keys), ["/history", "Enter", "Escape"]);
+    assert.equal(opened(), "Fix", "a row was opened despite no truncation-sized match");
+    assert.equal(result.restored, false);
+  });
+
+  it("opens a row the picker truncated to its column width", async () => {
+    // A long title is cut by the picker, so the row is a prefix of the recorded
+    // title. That is the case the shorter-row direction exists for.
+    const clock = new FakeClock();
+    const { pane, opened } = pickerPane("Remember the word ORA", ["just now   3 msgs   Remember the word ORA"]);
+    const result = await resumeChat({
+      pane,
+      config: testConfig(clock),
+      title: "Remember the word ORANGE and reply with just STORED",
+    });
+
+    assert.deepEqual(pane.sent.map((entry) => entry.keys), ["/history", "Enter", "Enter"]);
+    assert.equal(opened(), "Remember the word ORA");
+    // The footer shows the cut title, which is not the recorded one.
+    assert.equal(result.restored, false);
+  });
+
   it("does not open a chat when the recorded title is empty", async () => {
     // An empty title is a prefix of every row, so without the guard the first
     // chat in the picker would be opened and then rejected by the footer check.

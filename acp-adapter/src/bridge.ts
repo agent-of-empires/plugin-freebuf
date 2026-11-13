@@ -405,11 +405,23 @@ function titleMatches(actual: string | null, expected: string): boolean {
 }
 
 /**
+ * Shortest picker row that may be read as a truncated version of a title.
+ *
+ * The picker cuts a long title at its column width, so the row still holds most
+ * of the name. A short row that merely starts the same way is a different chat
+ * (recorded `Fix tests`, sole row `Fix`), and opening it would replay the wrong
+ * conversation.
+ */
+const MIN_TRUNCATED_TITLE = 16;
+
+/**
  * Index of the history row naming the requested chat, or -1.
  *
- * A row can be truncated to the picker's width, so a prefix counts as a match
- * too, but only when exactly one row matches: with `Fix tests` recorded, rows
- * for `Fix tests` and `Fix tests on macOS` must not resolve to the wrong one.
+ * A row can be truncated to the picker's width, so a truncated row counts as a
+ * match too, but only when exactly one row matches and the row is long enough
+ * to be a cut title rather than a different chat that shares a prefix: with
+ * `Fix tests` recorded, rows for `Fix tests` and `Fix tests on macOS` must not
+ * resolve to the wrong one.
  */
 function historyRowIndex(rows: string[], expected: string): number {
   const want = expected.trim();
@@ -421,7 +433,12 @@ function historyRowIndex(rows: string[], expected: string): number {
   const matches: number[] = [];
   rows.forEach((row, index) => {
     const text = row.trim();
-    if (text !== "" && (text.startsWith(want) || want.startsWith(text))) {
+    if (text === "") return;
+    // A row longer than the recorded title only matches when the title is a
+    // prefix of it, which the picker never produces unless the record came from
+    // a shorter footer; keep that direction as it was. A shorter row is the
+    // truncated case and needs to be long enough to be a cut title.
+    if (text.startsWith(want) || (want.startsWith(text) && text.length >= MIN_TRUNCATED_TITLE)) {
       matches.push(index);
     }
   });
