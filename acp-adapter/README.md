@@ -59,9 +59,9 @@ Scripts: `npm test` (node's built-in test runner), `npm run typecheck`.
    the ACP session id and returns that id.
 2. `session/prompt` sends the prompt as **literal** keys (`send-keys -l`, so a
    prompt containing `Enter` is not interpreted as a keypress), waits out the
-   TUI's paste window, then presses `Enter`. If the pane does not react, the
-   press is retried (up to three), because a swallowed `Enter` otherwise leaves
-   the prompt typed in the composer with no turn running.
+   TUI's paste window, then presses `Enter`. Sent in one burst the `Enter` is
+   read as part of a paste and dropped, which leaves the prompt typed in the
+   composer with no turn running.
 3. It waits for the TUI to echo the prompt and resets its diff baseline, so
    the user's own text is never streamed back as assistant output.
 4. It polls `tmux capture-pane -p -e`, strips ANSI escapes, diffs the
