@@ -43,8 +43,13 @@ export function defaultStoreDir(): string {
 
 function recordPath(dir: string, sessionId: string): string {
   // Session ids are adapter-generated (`freebuff-acp-<n>-<random>`), but they
-  // are used as file names, so anything unexpected is replaced.
-  return join(dir, `${sessionId.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+  // are used as file names, so anything unexpected is percent-encoded: a plain
+  // replace was lossy, so `a/b` and `a_b` shared one record file. `%` itself is
+  // outside the safe set, which keeps the encoding one-to-one.
+  const name = sessionId.replace(/[^A-Za-z0-9._-]/g, (char) =>
+    `%${(char.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(2, "0")}`,
+  );
+  return join(dir, `${name}.json`);
 }
 
 /**
