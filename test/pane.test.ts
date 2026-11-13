@@ -38,6 +38,15 @@ const IDLE_PANE = [
   " ← for history · ? for help",
 ].join("\n");
 
+/** Freebuff's failure surface, drawn in place of the composer like the question panel. */
+const ERROR_PANE = [
+  "     Row badge becomes one status icon/glyph tinted by workflow state, and the",
+  "╭────────────── Error ──────────────╮",
+  "│                        Close ✕ │",
+  "│ The agent step failed: request timed out.     │",
+  "╰───────────────────────────────────────────╯",
+].join("\n");
+
 describe("pane classification", () => {
   it("reads a blocking question modal as waiting", () => {
     expect(classifyPane(WAITING_PANE)).toBe("waiting");
@@ -261,6 +270,45 @@ describe("pane classification", () => {
       "╰──────────────────────────────────────────╯",
     ].join("\n");
     expect(classifyPane(prose)).toBe("idle");
+  });
+
+  it("reads an error dialog as error, not as a question", () => {
+    expect(classifyPane(ERROR_PANE)).toBe("error");
+  });
+
+  it("keeps a question waiting when its body mentions an error", () => {
+    // Only the caption decides: a question's body is free text, and the agent's
+    // own words about a failed step do not turn the question into an error.
+    const asking = [
+      "╭────────────── Some questions for you ──────────────╮",
+      "│                                          Close ✕ │",
+      "│ ▼ The previous step failed with an error. Retry?  │",
+      "╰──────────────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(asking)).toBe("waiting");
+  });
+
+  it("reads a caption that both asks and reports as waiting", () => {
+    // The question is what blocks; a failure in the same caption does not make
+    // it an error, because the user is still the one who has to answer.
+    const both = [
+      "╭────────── Do you want to proceed? A step failed ──────────╮",
+      "│                                              Close ✕ │",
+      "╰──────────────────────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(both)).toBe("waiting");
+  });
+
+  it("leaves a caption that only names errors to the composer", () => {
+    // The caption has to say the dialog reports a failure; `Errors` on its own is
+    // not a verdict, so the absence of a composer decides.
+    const plural = [
+      "╭────────────────── Errors ──────────────────╮",
+      "│                                      Close ✕ │",
+      "│  3 rows failed to sync.                     │",
+      "╰─────────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(plural)).toBe("idle");
   });
 
   it("prefers a dialog over the working line it was drawn across", () => {
