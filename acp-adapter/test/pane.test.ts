@@ -142,6 +142,19 @@ describe("TmuxPaneSource.start", () => {
     const { exec, calls } = fakeTmux();
     const pane = new TmuxPaneSource({ session: "s", exec });
     await pane.capture();
-    assert.deepEqual(calls[0], ["capture-pane", "-p", "-e", "-t", "=s"]);
+    assert.deepEqual(calls[0], ["capture-pane", "-p", "-e", "-t", "=s:"]);
+  });
+
+  it("addresses the pane of an exact session for capture and send", async () => {
+    const { exec, calls } = fakeTmux();
+    const pane = new TmuxPaneSource({ session: "s", exec });
+    await pane.capture();
+    await pane.send("hi", { literal: true });
+    await pane.stop();
+    // A bare `=s` is a session target, which tmux rejects for a pane command, so
+    // the pane commands carry the trailing colon and the session ones do not.
+    assert.deepEqual(calls[0], ["capture-pane", "-p", "-e", "-t", "=s:"]);
+    assert.deepEqual(calls[1], ["send-keys", "-t", "=s:", "-l", "--", "hi"]);
+    assert.deepEqual(calls[2], ["kill-session", "-t", "=s"]);
   });
 });

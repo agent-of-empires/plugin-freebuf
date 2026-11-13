@@ -91,6 +91,19 @@ export function exactTarget(session: string): string {
 }
 
 /**
+ * The same exact match, addressed at the session's pane.
+ *
+ * `capture-pane` and `send-keys` take a target-pane, and tmux refuses a bare
+ * `=<name>` for those ("can't find pane: =name"): the trailing colon is what
+ * makes the target a pane rather than a session. Session commands
+ * (`kill-session`, `has-session`) take the session target from
+ * `exactTarget` without it.
+ */
+export function exactPane(session: string): string {
+  return `=${session}:`;
+}
+
+/**
  * The default pane command: launch the Freebuff TUI in the session cwd, or with
  * `--continue` to reopen the most recent conversation of that directory.
  */
@@ -188,11 +201,11 @@ export class TmuxPaneSource implements SessionPane {
   async capture(): Promise<string> {
     // `-e` keeps escape sequences so the caller sees exactly what a terminal
     // would; `stripAnsi` runs on the diffing side.
-    return await this.exec(["capture-pane", "-p", "-e", "-t", exactTarget(this.options.session)]);
+    return await this.exec(["capture-pane", "-p", "-e", "-t", exactPane(this.options.session)]);
   }
 
   async send(keys: string, options?: SendOptions): Promise<void> {
-    const args = ["send-keys", "-t", exactTarget(this.options.session)];
+    const args = ["send-keys", "-t", exactPane(this.options.session)];
     if (options?.literal) {
       args.push("-l");
     }
