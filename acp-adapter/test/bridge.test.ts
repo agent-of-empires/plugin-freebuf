@@ -644,9 +644,8 @@ describe("resumeChat", () => {
     const result = await resumeChat({ pane, config: testConfig(clock), title: "" });
 
     assert.equal(result.restored, false);
-    assert.ok(pane.sent.some((entry) => entry.keys === "Escape"), "the picker was left open");
-    // No arrow key: nothing was selected, so the row was never opened.
-    assert.ok(!pane.sent.some((entry) => entry.keys === "Down"), "a row was selected for an empty title");
+    // The guard runs before /history is sent, so the picker never opens at all.
+    assert.deepEqual(pane.sent, [], "the picker was opened for an empty title");
   });
 
   it("does not accept a footer title that only starts the same way", async () => {

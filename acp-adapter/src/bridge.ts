@@ -350,6 +350,11 @@ export async function resumeChat(request: ResumeRequest): Promise<ResumeResult> 
   if (titleMatches(title, expected)) {
     return { restored: true, title, messages: resumedMessages(screen) };
   }
+  if (expected.trim() === "") {
+    // No recorded title to pick by: opening the picker would only open and
+    // close it, so keep whatever chat is already showing.
+    return { restored: false, title, messages: resumedMessages(screen) };
+  }
 
   // Pick the chat out of the TUI's history list instead.
   await pane.send("/history", { literal: true });
