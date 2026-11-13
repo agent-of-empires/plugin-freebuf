@@ -142,6 +142,17 @@ export function createAdapter(options: AdapterOptions): AgentApp {
       try {
         pane = await options.createPane({ sessionId: params.sessionId, cwd: params.cwd, resume: true });
       } catch (err) {
+        // The resume path kills the old tmux session before starting its own, so
+        // the state still registered here points at a pane that is gone: a
+        // later prompt would type into it. Drop the entry and the pane with it.
+        sessions.delete(params.sessionId);
+        if (previous !== undefined) {
+          try {
+            await previous.pane.stop();
+          } catch {
+            // Already gone.
+          }
+        }
         const detail = err instanceof Error ? err.message : String(err);
         throw new RequestError(-32000, `failed to resume the Freebuff pane: ${detail}`);
       } finally {
@@ -249,6 +260,14 @@ export function createAdapter(options: AdapterOptions): AgentApp {
         return;
       }
       session.cancelled = true;
+      // A load in flight is driving the TUI's /history picker: the interrupt key
+      // would cancel the picker, fail the resume and tear the pane down, so only
+      // record the cancel here. `loading` covers the window where the load is
+      // still starting its pane and `resuming` the one where it is driving the
+      // picker. A turn that waits on the load reads the flag.
+      if (session.resuming !== undefined || loading.has(params.sessionId)) {
+        return;
+      }
       // The TUI's interrupt key stops the in-flight turn (Ctrl-C in Freebuff).
       await session.pane.send(INTERRUPT_KEY);
     });

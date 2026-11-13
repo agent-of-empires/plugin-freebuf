@@ -8,7 +8,7 @@ import { PassThrough, Readable, Writable } from "node:stream";
 import { ndJsonStream } from "@agentclientprotocol/sdk";
 import { createAdapter, type AdapterOptions } from "../src/adapter.ts";
 import { memorySessionStore } from "../src/store.ts";
-import { composerScreen, FakeClock, FakePane, fakePaneFactory } from "./fake.ts";
+import { composerScreen, FakeClock, FakePane, fakePaneFactory, READY_SCREEN } from "./fake.ts";
 
 type Message = {
   jsonrpc?: string;
@@ -722,6 +722,129 @@ describe("session/load guards", () => {
     assert.equal(load.error, undefined);
     const typed = panes.flatMap((pane) => pane.sent.map((entry) => entry.keys));
     assert.ok(!typed.includes("too early"), "the refused prompt reached a composer");
+  });
+
+  it("drops the pane the reload killed when the new one cannot start", async () => {
+    // A resumed pane kills the old tmux session before it starts its own, so a
+    // failed start leaves the registered state pointing at a session that no
+    // longer exists. A later prompt would type into it.
+    const title = "Remember the word PLUM. Reply with just: STORED";
+    const store = memorySessionStore();
+    let creations = 0;
+    const { client, panes } = connectResumed({
+      screen: resumedScreen(title, title, "STORED"),
+      store,
+      gate: async () => {
+        // The first pane is `session/new`; the load's is the one that fails.
+        if (creations++ === 0) return;
+        throw new Error("the recorded working directory is gone");
+      },
+    });
+    await initialize(client);
+    const sessionId = await newSession(client, "/tmp/project");
+    store.set(sessionId, { cwd: "/tmp/project", title });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "session/load",
+      params: { sessionId, cwd: "/tmp/project", mcpServers: [] },
+    });
+    const load = await client.next((m) => m.id === 5);
+    assert.equal((load.error as { code: number }).code, -32000);
+
+    assert.equal(panes[0].stopped, true, "the pane the reload killed is still registered");
+    assert.equal(store.get(sessionId)?.title, title, "the record must survive the failed load");
+
+    // The session is gone, so a prompt is refused instead of typed into a pane
+    // that no longer exists.
+    client.send({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "session/prompt",
+      params: { sessionId, prompt: [{ type: "text", text: "still there?" }] },
+    });
+    const prompt = await client.next((m) => m.id === 6);
+    assert.equal((prompt.error as { code: number }).code, -32002);
+  });
+
+  it("does not interrupt the pane when a cancel arrives during a load", async () => {
+    // The load is driving /history: the interrupt key would cancel the picker
+    // and fail the resume the host is waiting for.
+    const title = "Remember the word PLUM. Reply with just: STORED";
+    const store = memorySessionStore();
+    let release: () => void = () => {};
+    let entered = false;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let creations = 0;
+    const { client, panes } = connectResumed({
+      screen: resumedScreen(title, title, "STORED"),
+      store,
+      gate: async () => {
+        if (creations++ === 0) return;
+        entered = true;
+        await held;
+      },
+    });
+    await initialize(client);
+    const sessionId = await newSession(client, "/tmp/project");
+    store.set(sessionId, { cwd: "/tmp/project", title });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "session/load",
+      params: { sessionId, cwd: "/tmp/project", mcpServers: [] },
+    });
+    for (let i = 0; i < 200 && !entered; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.ok(entered, "the load never reached the pane factory");
+
+    client.send({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId } });
+    // Give the cancel a turn of the loop before the load is released.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    release();
+
+    const load = await client.next((m) => m.id === 5);
+    assert.equal(load.error, undefined, "the cancel tore the resume down");
+    const typed = panes.flatMap((pane) => pane.sent.map((entry) => entry.keys));
+    assert.ok(!typed.includes("C-c"), "the interrupt key was sent into the picker");
+  });
+
+  it("does not interrupt the pane while the loaded pane is picking a chat", async () => {
+    // The wake prompt is parked on the load, which is waiting in the /history
+    // picker. An interrupt key here cancels the picker and fails the resume.
+    const title = "Remember the word PLUM. Reply with just: STORED";
+    const store = memorySessionStore();
+    // A settled composer whose picker never lists anything: the load keeps
+    // polling until its deadline instead of finishing.
+    const { client, panes } = connectResumed({ screen: READY_SCREEN, store });
+    await initialize(client);
+    const sessionId = await newSession(client, "/tmp/project");
+    store.set(sessionId, { cwd: "/tmp/project", title });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "session/load",
+      params: { sessionId, cwd: "/tmp/project", mcpServers: [] },
+    });
+    // Let the load get as far as the picker.
+    const loaded = panes[panes.length - 1];
+    for (let i = 0; i < 200 && !loaded.sent.some((entry) => entry.keys === "/history"); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    client.send({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId } });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const typed = panes.flatMap((pane) => pane.sent.map((entry) => entry.keys));
+    assert.ok(!typed.includes("C-c"), "the interrupt key was sent into the picker");
+    // Release the load so the test does not leave it running.
+    await client.next((m) => m.id === 5);
   });
 
   it("fails the load when the recorded chat is not the one that opened", async () => {

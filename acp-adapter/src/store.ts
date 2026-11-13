@@ -8,6 +8,7 @@
 // next to the session id, and used to pick the right chat back out of
 // `/history` when a session is resumed.
 
+import { randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -84,8 +85,10 @@ export function fileSessionStore(dir: string = defaultStoreDir()): SessionStore 
         // Written aside and renamed over the record: a crash mid-write would
         // otherwise leave truncated JSON, which reads back as if the session
         // had never been recorded and would reopen the wrong chat.
-        const staged = `${path}.${process.pid}.tmp`;
-        writeFileSync(staged, JSON.stringify(record), { mode: 0o600 });
+        // `wx` and a unique suffix: two writers must never share a staging file,
+        // and one must not overwrite the other's half-written record.
+        const staged = `${path}.${process.pid}-${randomUUID()}.tmp`;
+        writeFileSync(staged, JSON.stringify(record), { mode: 0o600, flag: "wx" });
         renameSync(staged, path);
       } catch {
         // Best-effort: see the doc comment above.
