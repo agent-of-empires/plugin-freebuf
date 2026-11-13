@@ -122,6 +122,37 @@ describe("runTurn", () => {
     assert.equal(streamed.includes("PLUM"), true);
   });
 
+  it("streams the answer that arrives in the same capture as a late echo", async () => {
+    // The echo and the first answer rows land between two polls. Rebasing on
+    // that capture without streaming what came after the echo lost the answer
+    // and left the turn waiting on a screen that never changed again.
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, composerScreen("boot"));
+    const sink = collect();
+    clock.onAdvance = (time) => {
+      if (time >= 900) {
+        pane.screen = composerScreen(
+          "boot",
+          "   [03:52 PM]",
+          "   remember the word PLUM ⎘",
+          "",
+          "  PLUM",
+        );
+      }
+    };
+
+    await runTurn({
+      pane,
+      promptText: "remember the word PLUM",
+      config: testConfig(clock, { echoTimeoutMs: 500 }),
+      events: sink.events,
+    });
+
+    const streamed = sink.chunks.join("\n");
+    assert.equal(streamed.includes("remember the word PLUM"), false, "late echo leaked into output");
+    assert.ok(streamed.includes("PLUM"), "the answer drawn with the echo was dropped");
+  });
+
   it("stops with cancelled when the turn is interrupted", async () => {
     const clock = new FakeClock();
     const pane = new FakePane(meta, composerScreen("boot"));
@@ -260,6 +291,36 @@ describe("runTurn", () => {
     assert.equal(sink.chunks.join("\n").includes("Add a task"), false);
   });
 
+  it("notices a permission modal drawn as a box in the bottom chrome", async () => {
+    // The transcript cut removes bordered boxes above the composer, so scanning
+    // the transcript alone never saw a boxed modal.
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, composerScreen("boot"));
+    const sink = collect();
+    const modal = [
+      "boot",
+      "> run it",
+      "╭──────────────────────────────────────────────╮",
+      "│  Do you want to allow this command?  [y/n]   │",
+      "╰──────────────────────────────────────────────╯",
+      " 24.8K (19%)                     ✕ End session",
+      "╭──────────────────────────────────────────────╮",
+      "│  ▍Enter a coding task                        │",
+      "╰──────────────────────────────────────────────╯",
+    ].join("\n");
+    pane.onSend = (keys) => {
+      if (keys === "Enter") pane.screen = composerScreen("boot", "> run it");
+    };
+    clock.onAdvance = (time) => {
+      if (time >= 600) pane.screen = modal;
+    };
+
+    await runTurn({ pane, promptText: "run it", config: testConfig(clock), events: sink.events });
+
+    assert.equal(sink.notices.length, 1, "the boxed modal was not noticed");
+    assert.match(sink.notices[0].title, /not bridged/);
+  });
+
   it("reports the permission-prompt limitation exactly once per turn", async () => {
     const clock = new FakeClock();
     const pane = new FakePane(meta, composerScreen("boot"));
@@ -324,6 +385,78 @@ describe("echo handling", () => {
     assert.ok(streamed.includes("three tests broke"));
   });
 
+  it("suppresses the echo of a prompt whose first line is blank", async () => {
+    // The needle used to be the first line, which is empty here: nothing was
+    // suppressed and the user's message came back as assistant output.
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, composerScreen("boot"));
+    const sink = collect();
+    pane.onSend = (keys) => {
+      if (keys === "Enter") {
+        pane.screen = composerScreen("boot", "   [03:52 PM]", "   quote the word KIWI ⎘");
+      }
+    };
+    clock.onAdvance = (time) => {
+      if (time >= 600) {
+        pane.screen = composerScreen("boot", "   [03:52 PM]", "   quote the word KIWI ⎘", "", "  KIWI");
+      }
+    };
+
+    await runTurn({
+      pane,
+      promptText: "\nquote the word KIWI",
+      config: testConfig(clock),
+      events: sink.events,
+    });
+
+    const streamed = sink.chunks.join("\n");
+    assert.equal(streamed.includes("quote the word KIWI"), false, "blank-first-line echo leaked");
+    assert.ok(streamed.includes("KIWI"));
+  });
+
+  it("still suppresses the echo when an older copy of the prompt scrolls off", async () => {
+    // A count over the whole transcript stayed equal here: one copy of the
+    // prompt left the top of the screen as the new copy was drawn.
+    const clock = new FakeClock();
+    const sink = collect();
+    const repeated = "run the tests";
+    const earlier = composerScreen(
+      "boot",
+      "   [03:51 PM]",
+      `   ${repeated} ⎘`,
+      "",
+      "  all green",
+      "",
+      "  some other old output",
+    );
+    const pane = new FakePane(meta, earlier);
+    pane.onSend = (keys) => {
+      if (keys === "Enter") {
+        // The old copy scrolled off the top in the same capture that draws the
+        // new one, so exactly one copy is on screen before and after.
+        pane.screen = composerScreen("  all green", "", "   [03:52 PM]", `   ${repeated} ⎘`);
+      }
+    };
+    clock.onAdvance = (time) => {
+      if (time >= 600) {
+        pane.screen = composerScreen(
+          "  all green",
+          "",
+          "   [03:52 PM]",
+          `   ${repeated} ⎘`,
+          "",
+          "  still green",
+        );
+      }
+    };
+
+    await runTurn({ pane, promptText: repeated, config: testConfig(clock), events: sink.events });
+
+    const streamed = sink.chunks.join("\n");
+    assert.equal(streamed.includes(repeated), false, "the new echo leaked while the old copy scrolled off");
+    assert.ok(streamed.includes("still green"));
+  });
+
   it("still suppresses the echo when the prompt was sent before", async () => {
     // The same words are already in the transcript from the earlier turn, so a
     // plain substring search finds the old copy and lets the new echo through.
@@ -350,6 +483,43 @@ describe("echo handling", () => {
 });
 
 describe("readiness", () => {
+  it("is ready at a composer that keeps repainting its chrome", async () => {
+    // The footer, the ad box and the status line change constantly. Comparing
+    // the raw capture meant the count never reached its threshold and every turn
+    // failed with NOT_READY.
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, composerScreen("boot"));
+    const sink = collect();
+    let counter = 0;
+    clock.onAdvance = () => {
+      counter += 1;
+      pane.screen = composerScreen("boot").replace("Enter a coding task", `thinking ${counter}s`);
+    };
+
+    const result = await runTurn({ pane, promptText: "hello", config: testConfig(clock), events: sink.events });
+
+    assert.equal(result.stopReason, "end_turn");
+    assert.deepEqual(pane.sent.map((entry) => entry.keys), ["hello", "Enter"]);
+  });
+
+  it("needs three settled captures, not four, to accept the prompt", async () => {
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, composerScreen("boot"));
+    const sink = collect();
+
+    await runTurn({
+      pane,
+      promptText: "hello",
+      config: testConfig(clock, { pollIntervalMs: 100, startupTimeoutMs: 300 }),
+      events: sink.events,
+    });
+
+    assert.ok(
+      pane.sent.some((entry) => entry.keys === "hello"),
+      "the prompt was never typed within three captures",
+    );
+  });
+
   it("fails a turn instead of typing into a pane that never showed its prompt", async () => {
     const clock = new FakeClock();
     const pane = new FakePane(meta, "installing...");
