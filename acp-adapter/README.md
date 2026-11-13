@@ -46,11 +46,11 @@ Point an ACP client at the adapter as the agent command, e.g.:
 
 Environment variables:
 
-| Variable              | Effect                                                        |
-| --------------------- | ------------------------------------------------------------- |
-| `FREEBUFF_ACP_COMMAND`| Command run inside the pane instead of `freebuff --cwd <cwd>` |
-| `FREEBUFF_ACP_TMUX`   | tmux binary to use (default `tmux`)                           |
-| `FREEBUFF_ACP_STATE_DIR` | State directory; records go in its `sessions/` (default `~/.cache/freebuff-acp`) |
+| Variable                 | Effect                                                                                   |
+| ------------------------ | ---------------------------------------------------------------------------------------- |
+| `FREEBUFF_ACP_COMMAND`   | Command run inside the pane instead of `freebuff --cwd <cwd>`                            |
+| `FREEBUFF_ACP_TMUX`      | tmux binary to use (default `tmux`)                                                      |
+| `FREEBUFF_ACP_STATE_DIR` | State directory; records go in its `sessions/` (default `~/.cache/freebuff-acp`)         |
 
 Scripts: `npm test` (node's built-in test runner), `npm run typecheck`.
 
@@ -137,9 +137,9 @@ when the session is busy (a turn, a resume or another load is in flight). Those
 refusals exist so a load cannot settle on a chat the host did not ask for.
 
 The record (`cwd` plus chat title, one small JSON file per session id under
-`$FREEBUFF_ACP_STATE_DIR` or `~/.cache/freebuff-acp/sessions/`) is refreshed
-when `session/new` runs and at the end of each turn, since Freebuff renames a
-chat after its first prompt.
+`$FREEBUFF_ACP_STATE_DIR` or `~/.cache/freebuff-acp/sessions/`) is rewritten
+when `session/new` runs, at the end of each turn (Freebuff renames a chat after
+its first prompt), and after a `session/load` has settled on a chat.
 
 A prompt that arrives while the resume is still navigating waits for it
 (`SessionState.resuming`): hosts wake a resumed session with a prompt
@@ -202,17 +202,25 @@ This adapter sees pixels, not events. Specifically:
 - **Resume is title-matching, not identity.** The adapter knows a chat by the
   title Freebuff shows for it. The footer title has to match the recorded one
   exactly, and a picker row is only accepted when it is the only row that
-  matches the recorded title as a prefix, so a shared prefix is refused rather
-  than guessed at. What remains is two chats in one directory with identical
-  full titles (the first exact row wins) and a chat renamed by hand, which no
-  longer matches its record. The conversation itself is whatever Freebuff
+  matches, in either direction: a row can be longer than the recorded title, or
+  shorter because the picker truncated it at its column width. A shorter row
+  only counts when it is at least 16 characters long, so a different chat that
+  merely starts the same way (`Fix` for a recorded `Fix tests`) is refused
+  rather than guessed at. What remains is two chats in one directory with
+  identical full titles (the first exact row wins), a shorter chat whose name is
+  a prefix of a recorded title and 16 characters or longer, and a chat renamed
+  by hand, which no longer matches its record. The conversation itself is whatever Freebuff
   restores; the adapter cannot inspect it. A load whose recorded title is not
   visible in the directory's history is refused rather than replaying another
   chat.
-- **Replay covers one viewport.** `session/load` replays the restored chat from
-  a single pane capture, so turns hidden above the visible rows (behind
-  Freebuff's `Load previous messages`) are not replayed to the host. Read the
-  TUI itself when older history matters.
+- **Replay covers one viewport, and its roles are inferred.** `session/load`
+  replays the restored chat from a single pane capture, so turns hidden above
+  the visible rows (behind Freebuff's `Load previous messages`) are not replayed
+  to the host. The capture carries no roles either: the split into user and
+  agent messages comes from the time stamp above a prompt and the badge on its
+  last row, so a prompt that Freebuff draws without them is replayed as agent
+  text, and a reply that happens to look like a stamped or badged row would be
+  replayed as user text. Read the TUI itself when older history matters.
 - **One turn at a time per session.** A second overlapping `session/prompt`
   is rejected with `-32000`. There is no `session/close`; tmux sessions are
   torn down when the adapter process exits (SIGINT/SIGTERM/SIGHUP and on
@@ -302,7 +310,7 @@ Resume, ads and the prompt echo were verified against the real TUI afterwards:
 | two chats in one directory | resuming the older session lands on the older chat (picked out of `/history`), not the newest |
 | rotating ad card mid-turn | no ad text in any streamed chunk |
 | long prompt, echo later than the window | the user's own message is not streamed back |
-| 25-line answer in one turn | every line present, no chrome, no echo
+| 25-line answer in one turn | every line present, no chrome, no echo |
 
 Still unverified: multi-line prompts, image/inline file handling (contents are
 dropped), how the permission-prompt patterns line up with the real wording,
