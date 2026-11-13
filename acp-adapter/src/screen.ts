@@ -44,8 +44,13 @@ const BOX_TOP = /^[ \t]*[╭┌]─*[╮┐][ \t]*$/;
 /** Bottom border of such a block (`╰──────╯`, `└──────┘`). */
 const BOX_BOTTOM = /^[ \t]*[╰└]─*[╯┘][ \t]*$/;
 
-/** A live turn status row: the interrupt hint or the post-turn session footer. */
-const STATUS_ROW = /(?:■[ \t]*Esc\b|✕[ \t]*End session)/;
+/**
+ * A live turn status row: the interrupt hint or the post-turn session footer.
+ * Anchored at the row's end, because the same words can appear inside an
+ * answer (`✕ End session` is a plausible thing to write about) and a row of
+ * transcript matched here would be cut away with the chrome.
+ */
+const STATUS_ROW = /(?:■[ \t]*Esc\b|✕[ \t]*End session)[ \t]*$/;
 
 /** The composer's prompt glyph (`▍` focused, `❯` unfocused) inside its box. */
 const PROMPT_ROW = /│[ \t]*(?:▍|❯)/;
@@ -66,18 +71,32 @@ export function isPromptVisible(lines: readonly string[]): boolean {
 // restart, since the TUI keeps the conversation, not the adapter.
 
 /**
- * Footer row holding the chat title. Anchored to the footer's `·` separators:
- * a message on screen can contain `Chat:` as well, and a title taken from one
- * of those would be recorded as the name of the conversation.
+ * Footer row holding the chat title. Anchored to the footer's `·` separators,
+ * and at least two of them: the footer is `model · cwd · Chat: <title>`, so a
+ * message that mentions `Chat:` (with or without one separator) cannot be read
+ * as the name of the conversation.
  */
-const CHAT_TITLE_ROW = /·\s*Chat:\s*(.*)$/;
+const CHAT_TITLE_ROW = /·[^·]*·\s*Chat:\s*(.*)$/;
+
+/**
+ * How far above the bottom of the screen the footer rows can sit.
+ *
+ * Freebuff draws two footer rows directly under the status line. Limiting the
+ * search to them keeps a message that happens to contain `· Chat:` from being
+ * read as the open chat's name.
+ */
+const FOOTER_ROWS = 4;
 
 /** The chat title shown in the footer, trimmed, or null when absent. */
 export function chatTitle(raw: string): string | null {
-  const lines = stripAnsi(raw).split("\n");
-  // Bottom-up: the footer is the last thing on screen, so a `Chat:` higher up is
-  // transcript rather than chrome.
-  for (let i = lines.length - 1; i >= 0; i--) {
+  const lines = stripAnsi(raw)
+    .split("\n")
+    .map((line) => line.replace(/\r/g, ""));
+  // The pane is padded to its full height with blank rows, so the bottom of the
+  // screen is the last row with something on it.
+  while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
+  const from = Math.max(0, lines.length - FOOTER_ROWS);
+  for (let i = lines.length - 1; i >= from; i--) {
     const match = CHAT_TITLE_ROW.exec(lines[i]);
     if (match === null) continue;
     const title = match[1].replace(/[│┃]+\s*$/, "").trim();
@@ -107,7 +126,19 @@ const HISTORY_ROW_TRAILER = /[\s[\]×█▄▀│┃]+$/u;
  * since an agent can quote `Select a chat to resume` in a message and treating
  * that as an open picker would blank out a real transcript.
  */
-const HISTORY_UI = [/Search chats/i, /Enter open chat/i, /Esc cancel/i];
+const HISTORY_SEARCH_ROW = /^[ \t]*▍[ \t]*Search chats\.\.\.[ \t]*$/;
+
+/** The picker's key hints, drawn on one row of their own below the box. */
+const HISTORY_HINT_ROW = /^[ \t]*↑↓ navigate\b.*\bEsc cancel[ \t]*$/;
+
+/**
+ * The picker's own controls, both matched as whole rows.
+ *
+ * A message can quote `Search chats` or `Esc cancel` inside a sentence, and an
+ * unanchored substring match would then turn a transcript into an open picker
+ * and blank it out.
+ */
+const HISTORY_UI = [HISTORY_SEARCH_ROW, HISTORY_HINT_ROW];
 
 /**
  * A picker row as the TUI frames it: a `N msgs` row between the box borders.
@@ -166,12 +197,15 @@ export function splitTranscriptMessages(lines: readonly string[]): { role: "user
   // True when the next visible row still belongs to the same user message: a
   // prompt can contain blank paragraphs of its own, and its badge sits on the
   // message's last row, below any of them.
+  // Every row up to the next stamp belongs to the message being read, so the
+  // badge anywhere in them continues it. Looking only at the first non-blank
+  // row split a stamped message into user / agent / user as soon as it held a
+  // blank paragraph of its own.
   const continuesUserMessage = (from: number): boolean => {
     for (let i = from; i < body.length; i++) {
       const row = body[i];
-      if (row.trim() === "") continue;
       if (TIMESTAMP_ROW.test(row)) return false;
-      return /⎘\s*$/.test(row);
+      if (/⎘\s*$/.test(row)) return true;
     }
     return false;
   };
@@ -305,29 +339,44 @@ function chromeStart(lines: readonly string[]): number {
   if (box < 0) return lines.length;
 
   let start = box;
-  let insideBox = false;
   const limit = Math.max(0, box - MAX_CHROME_ROWS);
   for (let i = box - 1; i >= limit; i--) {
     const line = lines[i];
-    if (insideBox) {
-      start = i;
-      if (BOX_TOP.test(line)) insideBox = false;
-      continue;
-    }
     if (line.trim() === "" || STATUS_ROW.test(line) || BOX_TOP.test(line)) {
       start = i;
       continue;
     }
     if (BOX_BOTTOM.test(line)) {
-      insideBox = true;
-      start = i;
+      // A bordered block above the composer is only chrome when it says so (the
+      // ad card, the status card). A boxed answer or code block in the
+      // transcript is content: consuming it would drop that answer.
+      const top = findBoxTop(lines, i, limit);
+      if (top < 0 || !isChromeBox(lines.slice(top, i + 1))) break;
+      start = top;
+      i = top;
       continue;
     }
     break; // transcript content: the chrome block ends here
   }
-  // An unclosed box means the screen is not shaped as expected: stream it all
-  // rather than guessing that the transcript is empty.
-  return insideBox ? lines.length : start;
+  return start;
+}
+
+/** The top border of the box that ends at `bottom`, or -1 when there is none. */
+function findBoxTop(lines: readonly string[], bottom: number, limit: number): number {
+  for (let i = bottom - 1; i >= limit; i--) {
+    if (BOX_TOP.test(lines[i])) return i;
+  }
+  return -1;
+}
+
+/** True when a bordered block carries the marks of the TUI's own chrome. */
+function isChromeBox(rows: readonly string[]): boolean {
+  return rows.some(
+    (line) =>
+      STATUS_ROW.test(line) ||
+      WORKING_ROW.test(line) ||
+      CHROME_BOX_MARKERS.some((marker) => marker.test(line)),
+  );
 }
 
 /**
@@ -550,6 +599,10 @@ export class ScreenTracker {
 
   /** Feeds a raw capture in and returns the transcript text new since the last one. */
   update(raw: string): string {
+    // The chat picker covers the transcript, so its empty extraction is not new
+    // output. Keeping the previous baseline means closing the picker does not
+    // re-stream the whole conversation as if it had just been printed.
+    if (isChatHistoryScreen(raw)) return "";
     const next = extractTranscript(raw);
     const delta = diffScreens(this.prev, next);
     this.prev = next;

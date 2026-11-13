@@ -27,9 +27,9 @@ const REAL_SCREEN = [
   "  HELLO-ACP-OK",
   "                                                                  ⎘ • 6s • △▽",
   "",
-  " ╭────────────────────────────────────╮",
-  " │ Download Free  wisprflow.ai        │",
-  " ╰────────────────────────────────────╯",
+  " ╭─────────────────────────────────────────────╮",
+  " │ Download Free  wisprflow.ai   Ad [Report 1] │",
+  " ╰─────────────────────────────────────────────╯",
   " 24.8K (19%)                                        ✕ End session",
   "╭────────────────────────────────────────────────────────────────────────────╮",
   "│                                                                            │",
@@ -74,6 +74,43 @@ describe("extractTranscript", () => {
       "  second answer",
     ].join("\n");
     assert.deepEqual(extractTranscript(screen), ["  first answer", "  second answer"]);
+  });
+
+  it("keeps a boxed answer sitting above the composer", () => {
+    // A bordered block in the transcript is content. Only a box carrying the
+    // TUI's own chrome markers is cut away, or an answer the agent printed in a
+    // box would vanish from the streamed output.
+    const screen = [
+      "  here is the table you asked for:",
+      "  ╭────────────────────────╮",
+      "  │ name      value        │",
+      "  │ alpha     1            │",
+      "  ╰────────────────────────╯",
+      " 24.8K (19%)                                 ✕ End session",
+      "╭────────────────────────────────────────────────────────────────────────────╮",
+      "│  ▍Enter a coding task or / for commands                                    │",
+      "╰────────────────────────────────────────────────────────────────────────────╯",
+      " DeepSeek V4.1 Flash Slow · /private/tmp/probe · Chat: hello",
+    ].join("\n");
+    assert.deepEqual(extractTranscript(screen), [
+      "  here is the table you asked for:",
+      "  ╭────────────────────────╮",
+      "  │ name      value        │",
+      "  │ alpha     1            │",
+      "  ╰────────────────────────╯",
+    ]);
+  });
+
+  it("keeps a last transcript row that only quotes the status line", () => {
+    const screen = [
+      "  the footer says ✕ End session when the turn is done",
+      "╭────────────────────────────────────────────────────────────────────────────╮",
+      "│  ▍Enter a coding task or / for commands                                    │",
+      "╰────────────────────────────────────────────────────────────────────────────╯",
+    ].join("\n");
+    assert.deepEqual(extractTranscript(screen), [
+      "  the footer says ✕ End session when the turn is done",
+    ]);
   });
 
   it("drops the 'load previous messages' overlay floated over the transcript", () => {
@@ -261,6 +298,24 @@ describe("ScreenTracker", () => {
     assert.equal(tracker.update("boot\n> my prompt"), "");
     assert.equal(tracker.update("boot\n> my prompt\nanswer"), "\nanswer");
   });
+
+  it("keeps its baseline while the chat picker covers the transcript", () => {
+    // The picker hides the conversation, so feeding it in must not empty the
+    // baseline: closing the picker would then re-stream the whole transcript.
+    const transcript = "boot\n   [02:42 PM]\n   my prompt ⎘\n\n  the answer";
+    const picker = [
+      transcript,
+      "                    Select a chat to resume",
+      "   ▍Search chats...",
+      "  ┌──────────────────────────────────────────────────┐",
+      "  │ 2m ago         3 msgs     remember the word PLUM │",
+      "  └──────────────────────────────────────────────────┘",
+    ].join("\n");
+    const tracker = new ScreenTracker("boot");
+    assert.equal(tracker.update(transcript), "\n   [02:42 PM]\n   my prompt ⎘\n\n  the answer");
+    assert.equal(tracker.update(picker), "");
+    assert.equal(tracker.update(transcript), "", "the transcript came back as new output");
+  });
 });
 
 describe("chat identity and resume helpers", () => {
@@ -321,6 +376,24 @@ describe("chat identity and resume helpers", () => {
     ]);
   });
 
+  it("keeps a message that holds a blank paragraph and more rows in one message", () => {
+    // The badge sits on the message's last row, so a scan that stops at the
+    // first non-blank row split one prompt into user / agent / user.
+    const lines = [
+      "   [02:42 PM]",
+      "   first paragraph",
+      "",
+      "   third row",
+      "   last row ⎘",
+      "",
+      "  the answer",
+    ];
+    assert.deepEqual(splitTranscriptMessages(lines), [
+      { role: "user", text: "first paragraph\n\nthird row\nlast row" },
+      { role: "agent", text: "the answer" },
+    ]);
+  });
+
   it("keeps a user message that wrapped onto several rows in one message", () => {
     // The badge only marks the last row, so a per-row split would hand the
     // earlier rows to the agent and put the user's prompt in the wrong place.
@@ -348,6 +421,34 @@ describe("chat identity and resume helpers", () => {
       " DeepSeek V4.1 Flash Slow · /tmp/project · Chat: Rename a chat",
     ].join("\n");
     assert.equal(chatTitle(screen), "Rename a chat");
+  });
+
+  it("does not read the chat title out of a footer-less message", () => {
+    // No footer on screen, and the message mentions the separator and `Chat:`.
+    const screen = ["   [02:42 PM]", "   why does /tmp/x · Chat: show up here? ⎘"].join("\n");
+    assert.equal(chatTitle(screen), null);
+  });
+
+  it("does not treat a quoted picker hint as an open picker", () => {
+    // A standalone header line plus a message mentioning the search field used
+    // to be enough to blank a real transcript.
+    const screen = [
+      "  Select a chat to resume",
+      "",
+      "   [02:42 PM]",
+      "   the picker says ▍Search chats... in its search field ⎘",
+      "",
+      "  Correct.",
+    ].join("\n");
+    assert.equal(isChatHistoryScreen(screen), false);
+    assert.deepEqual(extractTranscript(screen), [
+      "  Select a chat to resume",
+      "",
+      "   [02:42 PM]",
+      "   the picker says ▍Search chats... in its search field ⎘",
+      "",
+      "  Correct.",
+    ]);
   });
 
   it("lists the picker row of a chat created a moment ago", () => {
