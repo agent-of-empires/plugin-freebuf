@@ -376,6 +376,28 @@ describe("chat identity and resume helpers", () => {
     ]);
   });
 
+  it("keeps two user messages and their answers apart", () => {
+    // The second user message's badge has no stamp of its own, and the first
+    // message's badge is already on screen: a look-ahead that ran past the
+    // first badge swallowed the agent reply into the user's text.
+    const lines = [
+      "   [2:42 PM]",
+      "   hello there ⎘",
+      "",
+      "  agent reply line",
+      "",
+      "   second prompt ⎘",
+      "",
+      "  second reply",
+    ];
+    assert.deepEqual(splitTranscriptMessages(lines), [
+      { role: "user", text: "hello there" },
+      { role: "agent", text: "agent reply line" },
+      { role: "user", text: "second prompt" },
+      { role: "agent", text: "second reply" },
+    ]);
+  });
+
   it("keeps a message that holds a blank paragraph and more rows in one message", () => {
     // The badge sits on the message's last row, so a scan that stops at the
     // first non-blank row split one prompt into user / agent / user.

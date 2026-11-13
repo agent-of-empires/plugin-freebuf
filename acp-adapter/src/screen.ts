@@ -188,19 +188,22 @@ export function splitTranscriptMessages(lines: readonly string[]): { role: "user
   const firstStamp = lines.findIndex((line) => TIMESTAMP_ROW.test(line));
   const body = firstStamp > 0 ? lines.slice(firstStamp) : lines;
   let current: { role: "user" | "agent"; rows: string[] } | null = null;
+  /** True once the user message being read has shown its `⎘` badge. */
+  let sawBadge = false;
   const flush = (): void => {
     if (current === null) return;
     const text = dedent(current.rows).trim();
     if (text !== "") messages.push({ role: current.role, text });
     current = null;
+    sawBadge = false;
   };
-  // True when the next visible row still belongs to the same user message: a
-  // prompt can contain blank paragraphs of its own, and its badge sits on the
-  // message's last row, below any of them.
-  // Every row up to the next stamp belongs to the message being read, so the
-  // badge anywhere in them continues it. Looking only at the first non-blank
-  // row split a stamped message into user / agent / user as soon as it held a
-  // blank paragraph of its own.
+  // True when a prompt's own badge is still to come below the blank row: a
+  // prompt can contain blank paragraphs, and its badge sits on its last row.
+  // Only a message that has not shown its badge yet can continue: the badge
+  // ends the user's rows, so once it is on screen the next blank row ends the
+  // message. Looking ahead unconditionally merged an agent reply into the
+  // user's message whenever a later badge, without a stamp of its own, sat
+  // past that reply.
   const continuesUserMessage = (from: number): boolean => {
     for (let i = from; i < body.length; i++) {
       const row = body[i];
@@ -217,18 +220,20 @@ export function splitTranscriptMessages(lines: readonly string[]): { role: "user
     if (TIMESTAMP_ROW.test(line)) {
       flush();
       current = { role: "user", rows: [] };
+      sawBadge = false;
       continue;
     }
     if (current !== null && current.role === "user") {
       // A blank row ends the message unless the badge is still to come below.
       if (line.trim() === "") {
-        if (continuesUserMessage(i + 1)) {
+        if (!sawBadge && continuesUserMessage(i + 1)) {
           current.rows.push("");
           continue;
         }
         flush();
         continue;
       }
+      if (/⎘\s*$/.test(line)) sawBadge = true;
       current.rows.push(stripUserBadge(line));
       continue;
     }
@@ -236,6 +241,7 @@ export function splitTranscriptMessages(lines: readonly string[]): { role: "user
       // Badge without a stamp: still the user's row.
       flush();
       current = { role: "user", rows: [stripUserBadge(line)] };
+      sawBadge = true;
       continue;
     }
     if (current === null || current.role !== "agent") {
