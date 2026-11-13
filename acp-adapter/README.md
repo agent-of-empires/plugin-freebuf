@@ -50,6 +50,7 @@ Environment variables:
 | --------------------- | ------------------------------------------------------------- |
 | `FREEBUFF_ACP_COMMAND`| Command run inside the pane instead of `freebuff --cwd <cwd>` |
 | `FREEBUFF_ACP_TMUX`   | tmux binary to use (default `tmux`)                           |
+| `FREEBUFF_ACP_STATE_DIR` | State directory; records go in its `sessions/` (default `~/.cache/freebuff-acp`) |
 
 Scripts: `npm test` (node's built-in test runner), `npm run typecheck`.
 
@@ -130,6 +131,11 @@ replay messages into a fresh TUI: it reopens the chat the TUI already has.
 3. replays the restored transcript to the host as `user_message_chunk` /
    `agent_message_chunk`, so the host's transcript matches the agent's.
 
+A load is refused, without touching the TUI, when the session has no record or
+no recorded title, when the requested `cwd` differs from the recorded one, and
+when the session is busy (a turn, a resume or another load is in flight). Those
+refusals exist so a load cannot settle on a chat the host did not ask for.
+
 The record (`cwd` plus chat title, one small JSON file per session id under
 `$FREEBUFF_ACP_STATE_DIR` or `~/.cache/freebuff-acp/sessions/`) is refreshed
 when `session/new` runs and at the end of each turn, since Freebuff renames a
@@ -161,9 +167,9 @@ This adapter sees pixels, not events. Specifically:
   adapter cannot attribute them, so the ACP client only ever receives
   `agent_message_chunk` text. No `tool_call` / `tool_call_update`, no
   `agent_thought_chunk`, no `plan`, no `usage_update`, no session modes, no
-  MCP servers. `session/load` is implemented (see below); everything else
-  session-scoped (`session/resume`, `session/set_mode`, `session/close`) is
-  not.
+  MCP servers. `session/load` is implemented (see Resuming a conversation);
+  everything else session-scoped (`session/resume`, `session/set_mode`,
+  `session/close`) is not.
 - **Heuristic turn end.** "The pane did not change for 2 seconds" is the only
   signal that a turn finished. A quiet pause longer than the window ends the
   turn early (later output is attributed to nothing); an always-repainting
@@ -188,15 +194,21 @@ This adapter sees pixels, not events. Specifically:
   repaint with no overlapping lines re-emits the whole screen as "new" output,
   and a mid-line rewrite can surface as a short suffix artifact. The chrome cut
   is a layout heuristic too: it assumes Freebuff keeps its transcript above a
-  bordered input box, so a bordered box sitting directly against the chrome is
-  taken for chrome and dropped, and a screen that does not fit the shape at all
-  is streamed whole rather than truncated.
+  bordered input box and drops a bordered box above the composer only when the
+  box carries one of the TUI's own chrome markers (an ad control, the status
+  line), so a bordered answer is kept but a chrome box drawn without its marker
+  would stream as text. A screen that does not fit the shape at all is streamed
+  whole rather than truncated.
 - **Resume is title-matching, not identity.** The adapter knows a chat by the
-  title Freebuff shows for it, so a hand-renamed chat, a title truncated past the
-  recorded prefix, or two chats in one directory sharing a prefix can reopen the
-  wrong conversation. The conversation itself is whatever Freebuff restores; the
-  adapter cannot inspect it. A load whose recorded title is not visible in the
-  directory's history is refused rather than replaying another chat.
+  title Freebuff shows for it. The footer title has to match the recorded one
+  exactly, and a picker row is only accepted when it is the only row that
+  matches the recorded title as a prefix, so a shared prefix is refused rather
+  than guessed at. What remains is two chats in one directory with identical
+  full titles (the first exact row wins) and a chat renamed by hand, which no
+  longer matches its record. The conversation itself is whatever Freebuff
+  restores; the adapter cannot inspect it. A load whose recorded title is not
+  visible in the directory's history is refused rather than replaying another
+  chat.
 - **Replay covers one viewport.** `session/load` replays the restored chat from
   a single pane capture, so turns hidden above the visible rows (behind
   Freebuff's `Load previous messages`) are not replayed to the host. Read the
@@ -295,5 +307,5 @@ Resume, ads and the prompt echo were verified against the real TUI afterwards:
 Still unverified: multi-line prompts, image/inline file handling (contents are
 dropped), how the permission-prompt patterns line up with the real wording,
 behavior when a turn is blocked on an interactive prompt for longer than
-`maxTurnMs`, and resuming a session after the host stops the worker (it cannot;
-see Limitations).
+`maxTurnMs`, and a resume after the worker was killed mid-turn (the chat reopens,
+but the interrupted turn is not replayed: only what the pane shows is).
