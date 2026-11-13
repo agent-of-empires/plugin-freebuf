@@ -168,17 +168,19 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
   // the user's message only reaches the transcript on submit, which is the copy
   // that must be suppressed. If no echo ever appears, the original baseline is
   // kept and nothing is skipped.
-  // The first non-empty line, since a prompt may start with a blank line and an
-  // empty needle suppresses nothing: the user's message would stream back as
-  // assistant output.
-  const promptNeedle = promptText
+  // Every non-empty line, since a prompt may start with a blank line and an
+  // empty needle suppresses nothing, and because a multi-line prompt is echoed
+  // as several rows: stopping at the first one streamed the rest of the user's
+  // message back as assistant output.
+  const echoLines = promptText
     .split("\n")
     .map((line) => line.trim())
-    .find((line) => line !== "") ?? "";
+    .map(collapse)
+    .filter((line) => line !== "");
   // The TUI wraps a long prompt over several rows, so the echo has to be found
-  // in whitespace-collapsed text: the needle is one source line and never
-  // matches the rows as they are drawn.
-  const echoNeedle = collapse(promptNeedle);
+  // in whitespace-collapsed text: a source line never matches the rows as they
+  // are drawn.
+  const echoNeedle = echoLines[0] ?? "";
   // The rows drawn since the baseline, which is where the echo has to appear. A
   // count over the whole transcript would miss it whenever an older copy of the
   // same prompt scrolled off the top as the new one was drawn.
@@ -186,22 +188,55 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
     const delta = diffScreens(baselineRows, extractTranscript(screen));
     return delta === "" ? [] : delta.split("\n");
   };
-  // Null while no new row carries the needle; otherwise the rows after the echo
-  // (an answer can be drawn in the same capture, and it has to be streamed).
+  // Null while the echo is not visible yet or still being drawn; otherwise the
+  // rows after the complete echo (an answer can be drawn in the same capture,
+  // and it has to be streamed).
   const rowsAfterEcho = (screen: string): string[] | null => {
     if (echoNeedle === "") return null;
     const rows = rowsSinceBaseline(screen);
     let seen = "";
-    for (let i = 0; i < rows.length; i++) {
+    let start = -1;
+    for (let i = 0; i < rows.length && start === -1; i++) {
       seen += collapse(rows[i]);
-      if (seen.includes(echoNeedle)) return rows.slice(i + 1);
+      const at = seen.indexOf(echoNeedle);
+      if (at !== -1) {
+        start = i;
+        // Whatever followed the first line inside the same row is the start of
+        // the rest of the prompt, or the answer when the prompt is one line.
+        seen = seen.slice(at + echoNeedle.length);
+      }
     }
-    return null;
+    if (start === -1) return null;
+    // The remaining lines of a multi-line prompt, joined with no separator
+    // because the TUI wraps mid-token: the echo is complete once the rows drawn
+    // since the first line account for them in order.
+    const rest = echoLines.slice(1).join("");
+    let echoed = seen;
+    let last = start;
+    while (last + 1 < rows.length && echoed !== rest) {
+      if (!rest.startsWith(echoed)) break;
+      last += 1;
+      echoed += collapse(rows[last]);
+    }
+    if (echoed === rest) return rows.slice(last + 1);
+    if (rest.startsWith(echoed)) {
+      // The echo is still being drawn. Waiting keeps the suppressed rows whole;
+      // the echo deadline covers a prompt whose tail never appears at all.
+      return null;
+    }
+    // The answer started in the same row as the last echo character: keep that
+    // row's tail, which is assistant text, and drop only what came before it.
+    const excess = echoed.length - rest.length;
+    let cut = rows[last].length;
+    for (let dropped = 0; dropped < excess && cut > 0; cut--) {
+      if (collapse(rows[last][cut - 1]) !== "") dropped += 1;
+    }
+    return [rows[last].slice(cut), ...rows.slice(last + 1)];
   };
   // Still waiting for the echo: the main loop keeps watching for it, because a
   // long prompt can take longer to reach the transcript than the initial window
   // and the echo would otherwise be streamed back as assistant output.
-  let echoPending = echoNeedle !== "";
+  let echoPending = echoLines.length > 0;
   const echoDeadline = config.now() + config.echoTimeoutMs;
   while (echoPending && config.now() < echoDeadline) {
     if (events.isCancelled()) {
