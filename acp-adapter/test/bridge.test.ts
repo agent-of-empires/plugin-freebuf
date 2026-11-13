@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   findPermissionPrompt,
+  MAX_SUBMIT_ATTEMPTS,
   runTurn,
   type BridgeConfig,
   type TurnNotice,
@@ -69,6 +70,58 @@ describe("runTurn", () => {
     );
     assert.equal(pane.sent[0].options?.literal, true, "prompt must be sent as literal text");
     assert.equal(pane.sent[1].options?.literal, undefined);
+  });
+
+  it("presses Enter again when the TUI drops the first submit", async () => {
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, "boot");
+    const sink = collect();
+    let enters = 0;
+    pane.onSend = (keys, options) => {
+      if (options?.literal) {
+        pane.screen = `boot\n> ${keys}`; // the TUI echoes the typed text at once
+        return;
+      }
+      if (keys === "Enter") {
+        enters += 1;
+        if (enters === 1) return; // swallowed: the composer keeps the prompt
+        pane.screen = "boot\n> do it\nthinking... ■ Esc";
+      }
+    };
+    clock.onAdvance = (time) => {
+      if (time >= 400) {
+        pane.screen = "boot\n> do it\nthinking... ■ Esc\ndoing it";
+      }
+    };
+
+    const result = await runTurn({ pane, promptText: "do it", config: testConfig(clock), events: sink.events });
+
+    assert.equal(result.stopReason, "end_turn");
+    assert.equal(enters, 2, "a dropped submit must be retried");
+    assert.deepEqual(sink.chunks, ["doing it"]);
+  });
+
+  it("fails the turn when the pane never accepts the submit", async () => {
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, "boot");
+    const sink = collect();
+    let enters = 0;
+    pane.onSend = (keys) => {
+      if (keys === "Enter") {
+        enters += 1; // every press is swallowed
+        return;
+      }
+      pane.screen = `boot\n> ${keys}`;
+    };
+
+    // A prompt left in the composer is a failed submission, never a turn that
+    // ran: reporting `end_turn` here is what makes the bug so hard to see.
+    await assert.rejects(
+      runTurn({ pane, promptText: "do it", config: testConfig(clock), events: sink.events }),
+      /was not submitted/,
+    );
+    assert.equal(enters, MAX_SUBMIT_ATTEMPTS, "retries stay bounded");
+    assert.deepEqual(sink.chunks, []);
   });
 
   it("waits out the paste window before submitting", async () => {

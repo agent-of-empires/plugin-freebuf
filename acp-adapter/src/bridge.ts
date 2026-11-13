@@ -8,7 +8,7 @@
 //   4. finish with `end_turn` once the screen has been quiet for
 //      `quiescenceMs`, or with `cancelled` when `session/cancel` interrupts it.
 
-import type { StopReason } from "@agentclientprotocol/sdk";
+import { RequestError, type StopReason } from "@agentclientprotocol/sdk";
 import { ScreenTracker, normalizeScreen } from "./screen.ts";
 import type { PaneSource } from "./pane.ts";
 
@@ -42,6 +42,15 @@ export const DEFAULT_BRIDGE_CONFIG: Omit<BridgeConfig, "now" | "sleep"> = {
   maxTurnMs: 300_000,
   submitDelayMs: 150,
 };
+
+/**
+ * Most presses of Enter one turn will make. A TUI can swallow the first one
+ * (its paste-burst window has not expired, or it is still settling), and
+ * nothing downstream notices: the prompt just sits in the composer and the
+ * turn never starts. Retrying is bounded so a pane holding a modal cannot be
+ * spammed with blank submits.
+ */
+export const MAX_SUBMIT_ATTEMPTS = 3;
 
 /** Real-time clock helpers used outside of tests. */
 export function systemClock(): Pick<BridgeConfig, "now" | "sleep"> {
@@ -127,7 +136,43 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
     await clearTypedPrompt(pane, Array.from(promptText).length);
     return { stopReason: "cancelled", streamedChars };
   }
+  const typedView = normalizeJoined(await pane.capture());
+  if (events.isCancelled()) {
+    return { stopReason: "cancelled", streamedChars };
+  }
   await pane.send(SUBMIT_KEY);
+
+  // A submit can still be lost, so press Enter again while the screen is
+  // unchanged: the TUI reacts the moment the prompt is really submitted.
+  let submitted = false;
+  let submitAttempts = 1;
+  const submitDeadline = config.now() + config.echoTimeoutMs;
+  while (config.now() < submitDeadline) {
+    await config.sleep(config.pollIntervalMs);
+    if (events.isCancelled()) break;
+    const screen = await pane.capture();
+    if (normalizeJoined(screen) !== typedView) {
+      submitted = true; // the TUI reacted: the prompt left the composer
+      break;
+    }
+    if (submitAttempts >= MAX_SUBMIT_ATTEMPTS) break;
+    submitAttempts += 1;
+    await pane.send(SUBMIT_KEY);
+  }
+
+  if (events.isCancelled()) {
+    return { stopReason: "cancelled", streamedChars };
+  }
+  // A composer that still holds the typed prompt never accepted the submit.
+  // Continuing here would be the original bug in a quieter form: the echo
+  // check would match the prompt in the composer, the screen would then stay
+  // still, and the turn would report `end_turn` for work that never started.
+  if (!submitted) {
+    throw new RequestError(
+      -32000,
+      `the prompt was not submitted: the composer did not accept ${SUBMIT_KEY} after ${submitAttempts} attempts`,
+    );
+  }
 
   // Wait for the TUI to echo the prompt so it is not streamed back as
   // assistant output. If no echo ever appears, the original baseline is kept
