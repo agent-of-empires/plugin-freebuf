@@ -58,7 +58,12 @@ export type TmuxPaneOptions = {
    * `0` to leave the pane unattended (tests). See `watchdogCommand`.
    */
   watchParentPid?: number;
-  /** Reopen the working directory's most recent conversation (`--continue`). */
+  /**
+   * Add `--continue` to the default command to reopen the working directory's
+   * most recent conversation. A custom `command` is started as it was given, so
+   * it carries the flag itself if it wants one; the bridge then falls back to
+   * the TUI's history picker, which works with any command that runs Freebuff.
+   */
   resume?: boolean;
 };
 
@@ -133,11 +138,12 @@ export function watchdogCommand(
   const watch = `while kill -0 ${options.parentPid} 2>/dev/null; do sleep 2; done; ${tmux} kill-session -t ${shellQuote(exactTarget(options.session))} 2>/dev/null`;
   // tmux runs its command through `default-shell`, which is not necessarily
   // POSIX (fish and nushell are common), so tmux must only see plain quoted
-  // words: the job control goes to `sh -c` along with the command itself. And
-  // through `sh -c` rather than straight after `exec` because a configured
-  // command may carry an assignment prefix (`MODE=dev freebuff ...`), which
-  // `exec` would read as the name of the program instead of its environment.
-  return `exec sh -c ${shellQuote(`{ ${watch}; } & exec ${inner}`)}`;
+  // words: the job control goes to `sh -c` along with the command itself. The
+  // command gets its own `sh -c` rather than being exec'd directly, because a
+  // configured command may carry an assignment prefix (`MODE=dev freebuff ...`)
+  // which `exec` reads as the name of the program instead of its environment
+  // (`exec: MODE=dev: not found`), and the pane would die at once.
+  return `exec sh -c ${shellQuote(`{ ${watch}; } & exec sh -c ${shellQuote(inner)}`)}`;
 }
 
 function defaultExec(tmuxBin: string): TmuxExec {

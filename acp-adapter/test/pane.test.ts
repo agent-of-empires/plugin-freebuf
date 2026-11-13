@@ -3,6 +3,7 @@
 // with a signal no handler can catch.
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { describe, it } from "node:test";
 import { freebuffCommand, TmuxPaneSource, watchdogCommand, shellQuote } from "../src/pane.ts";
 
@@ -43,7 +44,7 @@ describe("watchdogCommand", () => {
     // `=` makes tmux match the name exactly instead of accepting a prefix.
     assert.match(unwrap(command), /while kill -0 4242 2>\/dev\/null; do sleep 2; done; 'tmux' kill-session -t '=freebuff-acp-1-abc'/);
     // Through a shell: a configured command may start with an assignment prefix.
-    assert.ok(unwrap(command).endsWith(`exec ${inner}`));
+    assert.ok(unwrap(command).endsWith(`exec sh -c ${shellQuote(inner)}`));
     // The TUI must stay in the foreground: it needs the pty as its terminal.
     assert.ok(!command.includes(`${inner} &`));
   });
@@ -61,8 +62,8 @@ describe("watchdogCommand", () => {
     const inner = "MODE=dev freebuff --cwd '/tmp/x'";
     const command = watchdogCommand(inner, { session: "s", parentPid: 1 });
     // `exec MODE=dev freebuff ...` is not a command: the prefix needs a shell.
-    assert.ok(unwrap(command).endsWith(`exec ${inner}`));
-    assert.ok(!unwrap(command).includes(`exec ${shellQuote(inner)}`));
+    assert.ok(unwrap(command).endsWith(`exec sh -c ${shellQuote(inner)}`));
+    assert.ok(!unwrap(command).includes(`exec ${inner}`));
   });
 
   it("uses the configured tmux binary", () => {
@@ -84,6 +85,55 @@ function unwrap(command: string): string {
   assert.equal(quoted[quoted.length - 1], "'");
   return quoted.slice(1, -1).replace(/'\\''/g, "'");
 }
+
+// One test starts a real session: the watchdog's `sh -c` nesting can only be
+// checked by running it, and a string comparison on a fake pinning the wrong
+// form is what let the env-prefix regression through. It uses a private socket
+// (`tmux -L`) and its own session name so it cannot touch a live server, and it
+// is skipped where tmux is not installed.
+const tmuxAvailable = ((): boolean => {
+  try {
+    execFileSync("tmux", ["-V"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+describe("the watchdog under a real tmux", () => {
+  it("starts an env-prefixed command and leaves the session alive", { skip: !tmuxAvailable }, () => {
+    const socket = `freebuff-acp-test-${process.pid}`;
+    const tmux = (args: string[]): string => execFileSync("tmux", ["-L", socket, ...args], { encoding: "utf8" });
+    const alive = (session: string): boolean => {
+      try {
+        tmux(["has-session", "-t", `=${session}`]);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    // The watchdog polls this pid; it must outlive the assertions.
+    const command = watchdogCommand("MODE=dev sleep 30", { session: "watched", parentPid: process.pid });
+    try {
+      tmux(["new-session", "-d", "-s", "watched", command]);
+      // A pane whose command fails to start is gone by the next poll.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+      assert.equal(alive("watched"), true, "an env-prefixed command must keep the pane alive");
+      // The form this replaced died at once: `exec MODE=dev ...` is not a
+      // command, so this test would have caught the regression.
+      tmux(["kill-session", "-t", "=watched"]);
+      tmux(["new-session", "-d", "-s", "watched", `exec sh -c 'exec MODE=dev sleep 30'`]);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+      assert.equal(alive("watched"), false, "the unwrapped form is expected to die");
+    } finally {
+      try {
+        tmux(["kill-server"]);
+      } catch {
+        // Already gone.
+      }
+    }
+  });
+});
 
 describe("TmuxPaneSource.start", () => {
   it("creates a tall detached session and wraps the command in the watchdog", async () => {
