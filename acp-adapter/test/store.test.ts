@@ -35,15 +35,28 @@ describe("fileSessionStore", () => {
     assert.deepEqual(store.get("freebuff-acp-1-abc"), { cwd: "/tmp/project", title: null });
   });
 
-  it("sanitises a session id into a single file name", () => {
+  it("encodes a session id into a single file name", () => {
     const store = fileSessionStore(dir);
     store.set("../../etc/passwd", { cwd: "/tmp/project", title: "t" });
     const names = readdirSync(dir);
     assert.equal(names.length, 1);
-    assert.equal(names[0], ".._.._etc_passwd.json");
+    assert.equal(names[0], "..%2F..%2Fetc%2Fpasswd.json");
     assert.deepEqual(store.get("../../etc/passwd"), { cwd: "/tmp/project", title: "t" });
     // Nothing was written outside the store directory.
     assert.deepEqual(readdirSync(root), ["sessions"]);
+  });
+
+  it("keeps ids that differ only in punctuation apart", () => {
+    // A one-way replace put `a/b` and `a_b`, or `x%2Fy` and `x/y`, in the same
+    // file, so one session could read another's directory and title.
+    const store = fileSessionStore(dir);
+    store.set("a/b", { cwd: "/tmp/a-slash-b", title: "one" });
+    store.set("a_b", { cwd: "/tmp/a-underscore-b", title: "two" });
+    store.set("a%2Fb", { cwd: "/tmp/a-literal", title: "three" });
+    assert.equal(readdirSync(dir).length, 3);
+    assert.deepEqual(store.get("a/b"), { cwd: "/tmp/a-slash-b", title: "one" });
+    assert.deepEqual(store.get("a_b"), { cwd: "/tmp/a-underscore-b", title: "two" });
+    assert.deepEqual(store.get("a%2Fb"), { cwd: "/tmp/a-literal", title: "three" });
   });
 
   it("reports no record for a session it never wrote", () => {
