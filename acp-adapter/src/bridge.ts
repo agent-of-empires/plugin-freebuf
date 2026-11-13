@@ -44,6 +44,12 @@ export type BridgeConfig = {
   maxTurnMs: number;
   /** How long to wait for the TUI to settle at its prompt before typing. */
   startupTimeoutMs: number;
+  /**
+   * Pause between typing the prompt and pressing Enter. Freebuff's input
+   * handler treats text that arrives with an Enter in the same burst as a
+   * paste and drops the Enter, so the two must not be sent back to back.
+   */
+  submitDelayMs: number;
   now: () => number;
   sleep: (ms: number) => Promise<void>;
 };
@@ -54,6 +60,7 @@ export const DEFAULT_BRIDGE_CONFIG: Omit<BridgeConfig, "now" | "sleep"> = {
   echoTimeoutMs: 10_000,
   maxTurnMs: 300_000,
   startupTimeoutMs: 90_000,
+  submitDelayMs: 150,
 };
 
 /**
@@ -164,6 +171,16 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
   // unquoted tmux send-keys would read words such as "Enter" inside the prompt
   // as key names.
   await pane.send(promptText, { literal: true });
+  // Let the typed text settle before pressing Enter. Sent in one burst, the
+  // Enter lands inside the TUI's paste window and is discarded, which looks
+  // exactly like a turn that started when it did not: the prompt stays in the
+  // composer and the screen never changes.
+  await config.sleep(config.submitDelayMs);
+  // A cancel during the pause must not be followed by a submit: the user asked
+  // for the turn to stop, and pressing Enter would start one anyway.
+  if (events.isCancelled()) {
+    return { stopReason: "cancelled", streamedChars };
+  }
   await pane.send(SUBMIT_KEY);
 
   // Wait for the TUI to echo the prompt into the transcript so it is not
