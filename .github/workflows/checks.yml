@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   manifest:
     name: Validate manifest
@@ -36,3 +39,24 @@ jobs:
       - run: npm run lint
       - run: npm run build
       - run: npm test
+
+  # acp-adapter/ is a separate package with its own deps and test runner, so the
+  # root checks above never reach it. Its sources are linted with the root config.
+  adapter:
+    name: Lint, type-check, test ACP adapter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install
+      - run: npx eslint acp-adapter/src acp-adapter/test
+      - run: npm ci
+        working-directory: acp-adapter
+      - run: npm run typecheck
+        working-directory: acp-adapter
+      - run: npm test
+        working-directory: acp-adapter

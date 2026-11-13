@@ -1,6 +1,207 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ScreenTracker, diffScreens, normalizeScreen } from "../src/screen.ts";
+import {
+  ScreenTracker,
+  diffScreens,
+  extractTranscript,
+  isPromptVisible,
+  isWorkingScreen,
+  normalizeScreen,
+  chatTitle,
+  chatHistoryRows,
+  isChatHistoryScreen,
+  splitTranscriptMessages,
+} from "../src/screen.ts";
+
+/**
+ * A capture shaped like the real Freebuff screen: transcript on top, then the
+ * bottom chrome block (an ad box, the live status line, the input box and the
+ * footer rows), all of which repaint and must never be streamed.
+ */
+const REAL_SCREEN = [
+  "  freebuff",
+  "",
+  "   [12:53 PM]",
+  "   Reply with exactly: HELLO-ACP-OK ⎘",
+  "",
+  "  HELLO-ACP-OK",
+  "                                                                  ⎘ • 6s • △▽",
+  "",
+  " ╭─────────────────────────────────────────────╮",
+  " │ Download Free  wisprflow.ai   Ad [Report 1] │",
+  " ╰─────────────────────────────────────────────╯",
+  " 24.8K (19%)                                        ✕ End session",
+  "╭────────────────────────────────────────────────────────────────────────────╮",
+  "│                                                                            │",
+  "│  ▍Enter a coding task or / for commands                                    │",
+  "│                                                                            │",
+  "╰────────────────────────────────────────────────────────────────────────────╯",
+  " DeepSeek V4.1 Flash Slow · /private/tmp/probe · /model to change · Chat: hello",
+  " ← for history · ? for help",
+].join("\n");
+
+describe("extractTranscript", () => {
+  it("keeps the conversation and cuts the bottom chrome block", () => {
+    assert.deepEqual(extractTranscript(REAL_SCREEN), [
+      "  freebuff",
+      "",
+      "   [12:53 PM]",
+      "   Reply with exactly: HELLO-ACP-OK ⎘",
+      "",
+      "  HELLO-ACP-OK",
+    ]);
+  });
+
+  it("drops the message badge the TUI repaints as its timer runs", () => {
+    const screen = ["  the answer", "                      ⎘ • 6s • △▽"].join("\n");
+    assert.deepEqual(extractTranscript(screen), ["  the answer"]);
+  });
+
+  it("drops a badge whose row ends in the scrollbar block glyph", () => {
+    // Captured live: the badge shares its row with the scrollbar column.
+    const screen = [
+      "  398",
+      "  400",
+      `   ${" ".repeat(120)}⎘ • 15s • △▽   ▄`,
+    ].join("\n");
+    assert.deepEqual(extractTranscript(screen), ["  398", "  400"]);
+  });
+
+  it("drops a badge that sits mid-transcript, not only the last row", () => {
+    const screen = [
+      "  first answer",
+      "                     ⎘ • 4s • △▽",
+      "  second answer",
+    ].join("\n");
+    assert.deepEqual(extractTranscript(screen), ["  first answer", "  second answer"]);
+  });
+
+  it("keeps a boxed answer sitting above the composer", () => {
+    // A bordered block in the transcript is content. Only a box carrying the
+    // TUI's own chrome markers is cut away, or an answer the agent printed in a
+    // box would vanish from the streamed output.
+    const screen = [
+      "  here is the table you asked for:",
+      "  ╭────────────────────────╮",
+      "  │ name      value        │",
+      "  │ alpha     1            │",
+      "  ╰────────────────────────╯",
+      " 24.8K (19%)                                 ✕ End session",
+      "╭────────────────────────────────────────────────────────────────────────────╮",
+      "│  ▍Enter a coding task or / for commands                                    │",
+      "╰────────────────────────────────────────────────────────────────────────────╯",
+      " DeepSeek V4.1 Flash Slow · /private/tmp/probe · Chat: hello",
+    ].join("\n");
+    assert.deepEqual(extractTranscript(screen), [
+      "  here is the table you asked for:",
+      "  ╭────────────────────────╮",
+      "  │ name      value        │",
+      "  │ alpha     1            │",
+      "  ╰────────────────────────╯",
+    ]);
+  });
+
+  it("keeps a last transcript row that only quotes the status line", () => {
+    const screen = [
+      "  the footer says ✕ End session when the turn is done",
+      "╭────────────────────────────────────────────────────────────────────────────╮",
+      "│  ▍Enter a coding task or / for commands                                    │",
+      "╰────────────────────────────────────────────────────────────────────────────╯",
+    ].join("\n");
+    assert.deepEqual(extractTranscript(screen), [
+      "  the footer says ✕ End session when the turn is done",
+    ]);
+  });
+
+  it("drops the 'load previous messages' overlay floated over the transcript", () => {
+    const screen = [
+      "  the answer so far",
+      "",
+      `   ${" ".repeat(90)}╭────────────────────────────╮`,
+      `   ${" ".repeat(90)}│  ↑ Load previous messages  │`,
+      `   ${" ".repeat(90)}╰────────────────────────────╯`,
+      "",
+      "╭────────────────────────────────────────────────────────────────────────────╮",
+      "│  ▍Enter a coding task or / for commands                                    │",
+      "╰────────────────────────────────────────────────────────────────────────────╯",
+      " DeepSeek V4.1 Flash Slow · /private/tmp/probe · Chat: hello",
+    ].join("\n");
+    assert.deepEqual(extractTranscript(screen), ["  the answer so far"]);
+  });
+
+  it("drops the promo card Freebuff rotates above the transcript", () => {
+    // Captured from freebuff 0.2.36 after an ad rotation leaked mid-turn.
+    const adBox = [
+      "  ╭───────────────────────────────────────────────────────────────╮",
+      "  │ Stop typing prompts. Start talking.        Ad [Report 2]      │",
+      "  │ Speak through features, bugs, and instructions. wisprflow.ai ↗ │",
+      "  ╰───────────────────────────────────────────────────────────────╯",
+    ].join("\n");
+    const screen = [
+      adBox,
+      "",
+      "   [02:42 PM]",
+      "   Remember the word PLUM. Reply with just: STORED ⎘",
+      "",
+      "  STORED",
+      "╭──────────────────────────────────────╮",
+      "│  ▍Enter a coding task or / for commands   │",
+      "╰──────────────────────────────────────╯",
+      " DeepSeek V4.1 Flash Slow · /tmp · Chat: hello",
+    ].join("\n");
+    assert.deepEqual(extractTranscript(screen), [
+      "",
+      "   [02:42 PM]",
+      "   Remember the word PLUM. Reply with just: STORED ⎘",
+      "",
+      "  STORED",
+    ]);
+  });
+
+  it("drops an ad text row left behind without its box", () => {
+    const screen = ["  Pitch your product here.     Ad [Report 7]", "  the answer"].join("\n");
+    assert.deepEqual(extractTranscript(screen), ["  the answer"]);
+  });
+
+  it("keeps a bordered box that is content, not an overlay", () => {
+    const screen = [
+      "  ╭───────╮",
+      "  │  ok   │",
+      "  ╰───────╯",
+      "  prose after the box",
+      "╭──────────────────────────────────────╮",
+      "│  ▍Enter a coding task or / commands   │",
+      "╰──────────────────────────────────────╯",
+      " DeepSeek V4.1 Flash Slow · /tmp · Chat: hello",
+    ].join("\n");
+    assert.deepEqual(extractTranscript(screen), [
+      "  ╭───────╮",
+      "  │  ok   │",
+      "  ╰───────╯",
+      "  prose after the box",
+    ]);
+  });
+
+  it("keeps a wordless answer that is not a badge", () => {
+    assert.deepEqual(extractTranscript("  the answer\n\n  42"), ["  the answer", "", "  42"]);
+  });
+
+  it("streams the whole screen when there is no input box", () => {
+    assert.deepEqual(extractTranscript("line one\nline two"), ["line one", "line two"]);
+  });
+});
+
+describe("screen state probes", () => {
+  it("detects the input box being on screen", () => {
+    assert.equal(isPromptVisible(normalizeScreen(REAL_SCREEN)), true);
+    assert.equal(isPromptVisible(normalizeScreen("  freebuff loading…")), false);
+  });
+
+  it("detects a live turn status line", () => {
+    assert.equal(isWorkingScreen("result\n thinking...                         ■ Esc"), true);
+    assert.equal(isWorkingScreen("result\n 24.8K (19%)       ✕ End session"), false);
+  });
+});
 
 describe("normalizeScreen", () => {
   it("strips ANSI escapes from the capture", () => {
@@ -96,5 +297,288 @@ describe("ScreenTracker", () => {
     tracker.reset("boot\n> my prompt");
     assert.equal(tracker.update("boot\n> my prompt"), "");
     assert.equal(tracker.update("boot\n> my prompt\nanswer"), "\nanswer");
+  });
+
+  it("keeps its baseline while the chat picker covers the transcript", () => {
+    // The picker hides the conversation, so feeding it in must not empty the
+    // baseline: closing the picker would then re-stream the whole transcript.
+    const transcript = "boot\n   [02:42 PM]\n   my prompt ⎘\n\n  the answer";
+    const picker = [
+      transcript,
+      "                    Select a chat to resume",
+      "   ▍Search chats...",
+      "  ┌──────────────────────────────────────────────────┐",
+      "  │ 2m ago         3 msgs     remember the word PLUM │",
+      "  └──────────────────────────────────────────────────┘",
+    ].join("\n");
+    const tracker = new ScreenTracker("boot");
+    assert.equal(tracker.update(transcript), "\n   [02:42 PM]\n   my prompt ⎘\n\n  the answer");
+    assert.equal(tracker.update(picker), "");
+    assert.equal(tracker.update(transcript), "", "the transcript came back as new output");
+  });
+});
+
+describe("chat identity and resume helpers", () => {
+  it("reads the chat title out of the footer", () => {
+    assert.equal(
+      chatTitle("  STORED\n DeepSeek V4.1 Flash Slow · /tmp/x · Chat: Remember the word ORANGE"),
+      "Remember the word ORANGE",
+    );
+  });
+
+  it("reports no title while the footer has none", () => {
+    assert.equal(chatTitle("  STORED\n ▍Enter a coding task"), null);
+  });
+
+  it("lists the /history picker rows in order", () => {
+    const picker = [
+      "                            Select a chat to resume",
+      "  ▍Search chats...",
+      "  ┌──────────────────────────────────────────────────────────────┐",
+      "  │ 1m ago    3 msgs   Something else entirely                   │",
+      "  │ 5m ago    3 msgs   Remember the word BANANA. Reply with just │",
+      "  └──────────────────────────────────────────────────────────────┘",
+    ].join("\n");
+    assert.equal(isChatHistoryScreen(picker), true);
+    assert.deepEqual(chatHistoryRows(picker), ["Something else entirely", "Remember the word BANANA. Reply with just"]);
+    assert.equal(isChatHistoryScreen("  ▍Enter a coding task"), false);
+  });
+
+  it("reads rows from the picker as the real TUI draws them", () => {
+    // Captured from freebuff 0.2.36: each row ends with a [×] control and the
+    // scrollbar column sits against the border.
+    const picker = [
+      "                                                                                         Select a chat to resume",
+      "   ▍Search chats...",
+      "  ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐",
+      "  │ 2m ago         3 msgs     Remember the word ORANGE. Reply with just: STORED                                                [×]  █│",
+      "  │ 6m ago         4 msgs     Something else entirely                                                                          [×]  █│",
+      "  └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘",
+    ].join("\n");
+    assert.equal(isChatHistoryScreen(picker), true);
+    assert.deepEqual(chatHistoryRows(picker), [
+      "Remember the word ORANGE. Reply with just: STORED",
+      "Something else entirely",
+    ]);
+  });
+
+  it("splits a restored transcript into user and agent messages", () => {
+    const lines = [
+      " ██████ freebuff banner",
+      "   [02:42 PM]",
+      "   Remember the word ORANGE. Reply with just: STORED ⎘",
+      "",
+      "  STORED",
+    ];
+    assert.deepEqual(splitTranscriptMessages(lines), [
+      { role: "user", text: "Remember the word ORANGE. Reply with just: STORED" },
+      { role: "agent", text: "STORED" },
+    ]);
+  });
+
+  it("keeps two user messages and their answers apart", () => {
+    // The second user message's badge has no stamp of its own, and the first
+    // message's badge is already on screen: a look-ahead that ran past the
+    // first badge swallowed the agent reply into the user's text.
+    const lines = [
+      "   [2:42 PM]",
+      "   hello there ⎘",
+      "",
+      "  agent reply line",
+      "",
+      "   second prompt ⎘",
+      "",
+      "  second reply",
+    ];
+    assert.deepEqual(splitTranscriptMessages(lines), [
+      { role: "user", text: "hello there" },
+      { role: "agent", text: "agent reply line" },
+      { role: "user", text: "second prompt" },
+      { role: "agent", text: "second reply" },
+    ]);
+  });
+
+  it("keeps a message that holds a blank paragraph and more rows in one message", () => {
+    // The badge sits on the message's last row, so a scan that stops at the
+    // first non-blank row split one prompt into user / agent / user.
+    const lines = [
+      "   [02:42 PM]",
+      "   first paragraph",
+      "",
+      "   third row",
+      "   last row ⎘",
+      "",
+      "  the answer",
+    ];
+    assert.deepEqual(splitTranscriptMessages(lines), [
+      { role: "user", text: "first paragraph\n\nthird row\nlast row" },
+      { role: "agent", text: "the answer" },
+    ]);
+  });
+
+  it("keeps a user message that wrapped onto several rows in one message", () => {
+    // The badge only marks the last row, so a per-row split would hand the
+    // earlier rows to the agent and put the user's prompt in the wrong place.
+    const lines = [
+      "   [02:42 PM]",
+      "   first line of a long prompt",
+      "   second line of the same prompt ⎘",
+      "",
+      "  the answer",
+    ];
+    assert.deepEqual(splitTranscriptMessages(lines), [
+      { role: "user", text: "first line of a long prompt\nsecond line of the same prompt" },
+      { role: "agent", text: "the answer" },
+    ]);
+  });
+
+  it("ignores a Chat: mention in the transcript when reading the title", () => {
+    // The footer is the only place the title lives; a message that says `Chat:`
+    // would otherwise be recorded as the name of the conversation.
+    const screen = [
+      "   [02:42 PM]",
+      "   how do I rename the Chat: title? ⎘",
+      "",
+      "  You can edit it.",
+      " DeepSeek V4.1 Flash Slow · /tmp/project · Chat: Rename a chat",
+    ].join("\n");
+    assert.equal(chatTitle(screen), "Rename a chat");
+  });
+
+  it("does not read the chat title out of a footer-less message", () => {
+    // No footer on screen, and the message mentions the separator and `Chat:`.
+    const screen = ["   [02:42 PM]", "   why does /tmp/x · Chat: show up here? ⎘"].join("\n");
+    assert.equal(chatTitle(screen), null);
+  });
+
+  it("does not treat a quoted picker hint as an open picker", () => {
+    // A standalone header line plus a message mentioning the search field used
+    // to be enough to blank a real transcript.
+    const screen = [
+      "  Select a chat to resume",
+      "",
+      "   [02:42 PM]",
+      "   the picker says ▍Search chats... in its search field ⎘",
+      "",
+      "  Correct.",
+    ].join("\n");
+    assert.equal(isChatHistoryScreen(screen), false);
+    assert.deepEqual(extractTranscript(screen), [
+      "  Select a chat to resume",
+      "",
+      "   [02:42 PM]",
+      "   the picker says ▍Search chats... in its search field ⎘",
+      "",
+      "  Correct.",
+    ]);
+  });
+
+  it("lists the picker row of a chat created a moment ago", () => {
+    // `just now` instead of `2m ago`: this is the off-by-one case, where the
+    // newest row used to be dropped and every offset below it pointed at the
+    // wrong chat.
+    const picker = [
+      "                              Select a chat to resume",
+      "   ▍Search chats...",
+      "  ┌─────────────────────────────────────────────────────────────────┐",
+      "  │ just now       3 msgs     remember the word BANANA          [×]  █│",
+      "  │ 5m ago         3 msgs     remember the word PLUM            [×]  █│",
+      "  └─────────────────────────────────────────────────────────────────┘",
+    ].join("\n");
+    assert.equal(isChatHistoryScreen(picker), true);
+    assert.deepEqual(chatHistoryRows(picker), ["remember the word BANANA", "remember the word PLUM"]);
+  });
+
+  it("detects a bare picker that has only the header and a boxed row", () => {
+    // No search field and no key hints: the row inside the box is the only
+    // structure there is, so the row shape has to be checked per line.
+    const picker = [
+      "                    Select a chat to resume",
+      "  ┌──────────────────────────────────────────────────┐",
+      "  │ 2m ago         3 msgs     remember the word PLUM │",
+      "  └──────────────────────────────────────────────────┘",
+    ].join("\n");
+    assert.equal(isChatHistoryScreen(picker), true);
+    assert.deepEqual(chatHistoryRows(picker), ["remember the word PLUM"]);
+  });
+
+  it("does not read a message that counts messages as the picker", () => {
+    // Both markers of the old detection are here: the header phrase and a line
+    // shaped like a picker row. Neither is picker furniture, and treating it as
+    // one blanked a real transcript.
+    const screen = [
+      "   [02:42 PM]",
+      "   see Select a chat to resume ⎘",
+      "",
+      "  more text",
+      "  it took 3 msgs total",
+    ].join("\n");
+    assert.equal(isChatHistoryScreen(screen), false);
+    const transcript = extractTranscript(screen).join("\n");
+    assert.ok(transcript.includes("it took 3 msgs total"), `dropped the message: ${JSON.stringify(transcript)}`);
+  });
+
+  it("keeps a bulleted list of bare numbers", () => {
+    // `•` is punctuation, not the badge: `⎘` and `△▽` are what mark one.
+    const screen = ["  answer", "  • 5%", "  • 10"].join("\n");
+    assert.deepEqual(extractTranscript(screen), ["  answer", "  • 5%", "  • 10"]);
+  });
+
+  it("does not mistake a quoted picker phrase for an open picker", () => {
+    // An agent can mention the picker in a message. Treating that as a modal
+    // would blank out the whole transcript until the phrase scrolled away.
+    const screen = [
+      "   [02:42 PM]",
+      "   where does `Select a chat to resume` come from? ⎘",
+      "",
+      "  It is the /history picker's header.",
+    ].join("\n");
+    assert.equal(isChatHistoryScreen(screen), false);
+    assert.ok(extractTranscript(screen).join("\n").includes("/history picker"));
+  });
+
+  it("keeps a blank paragraph inside a restored user message", () => {
+    // The badge sits on the message's last row, below the blank paragraph, so
+    // the blank row is part of the message rather than the gap before a reply.
+    const lines = [
+      "   [02:42 PM]",
+      "   first paragraph",
+      "",
+      "   second paragraph ⎘",
+      "",
+      "  the answer",
+    ];
+    assert.deepEqual(splitTranscriptMessages(lines), [
+      { role: "user", text: "first paragraph\n\nsecond paragraph" },
+      { role: "agent", text: "the answer" },
+    ]);
+  });
+
+  it("keeps a boxed answer that is not the input box", () => {
+    // Only a box holding the prompt glyph is chrome. Cutting at any box would
+    // drop the transcript down to a boxed result drawn by the agent.
+    const screen = [
+      "   [02:42 PM]",
+      "   sum the column ⎘",
+      "",
+      "  ╭───────────────╮",
+      "  │ total: 42     │",
+      "  ╰───────────────╯",
+    ].join("\n");
+    const transcript = extractTranscript(screen).join("\n");
+    assert.ok(transcript.includes("total: 42"), `lost the boxed answer: ${JSON.stringify(transcript)}`);
+    assert.ok(transcript.includes("sum the column"));
+  });
+
+  it("treats an open chat picker as having no transcript", () => {
+    const picker = [
+      "                              Select a chat to resume",
+      "   ▍Search chats...",
+      "  ┌─────────────────────────────────────────────────────────────────┐",
+      "  │ just now       3 msgs     remember the word BANANA          [×]  █│",
+      "  └─────────────────────────────────────────────────────────────────┘",
+      "  ↑↓ navigate · → / Enter open chat · Click [×] to remove · Esc cancel",
+    ].join("\n");
+    assert.deepEqual(extractTranscript(picker), []);
   });
 });
