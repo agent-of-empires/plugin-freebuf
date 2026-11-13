@@ -60,7 +60,7 @@ export const CAPTURE_LINES = 60;
 /** How long one capture may take before the session counts as unknown. */
 const CAPTURE_TIMEOUT_MS = 4_000;
 
-export type PaneState = "waiting" | "running" | "idle";
+export type PaneState = "waiting" | "running" | "idle" | "error";
 
 /** Rows a dialog's caption may sit above its close row. */
 const DIALOG_CAPTION_ROWS = 2;
@@ -81,6 +81,13 @@ const WAITING_DIALOG = /Some questions for you|Do you want to (?:proceed|allow|c
  */
 const INLINE_PROMPT = /^[ \t]*(?:\(y\/n\)|\[y\/N\]|Do you want to (?:proceed|allow|continue)|You have reached the concurrent[- ]session limit)/i;
 
+
+/**
+ * A caption that says the dialog reports a failure rather than asking
+ * anything. Only the caption counts: the body of a question is free text and
+ * may well mention an error.
+ */
+const ERROR_DIALOG = /\b(?:error|failed|failure)\b/i;
 
 /** Freebuff's live turn status line. */
 const STATUS_LINE = /^[ \t]*(?:working|thinking)\.\.\.[^\n]*■[ \t]*Esc\b[ \t]*$/;
@@ -196,11 +203,15 @@ function bottomDialog(lines: readonly string[]): string | null {
   return null;
 }
 
-/** What the dialog at the bottom of the pane is blocking on, or null if there is none. */
+/**
+ * What the dialog at the bottom of the pane is blocking on, or null when there
+ * is no dialog there or its caption says neither.
+ */
 function blockedOn(lines: readonly string[]): PaneState | null {
   const caption = bottomDialog(lines);
   if (caption === null) return null;
   if (WAITING_DIALOG.test(caption)) return "waiting";
+  if (ERROR_DIALOG.test(caption)) return "error";
   return null; // an unrecognised dialog is not a verdict; the composer decides
 }
 
