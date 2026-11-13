@@ -143,6 +143,56 @@ describe("pane classification", () => {
     expect(classifyPane(transcript)).toBe("idle");
   });
 
+  it("reads a live inline confirmation prompt as waiting", () => {
+    // Freebuff asks some confirmations in the composer itself rather than in a
+    // boxed dialog, so the question is the text just above the input.
+    const inline = [
+      "  The last turn finished in 2s.",
+      "  Do you want to proceed? (y/n)",
+      "╭──────────────────────────────────────────╮",
+      "│  ▍Add to the current task                │",
+      "╰──────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(inline)).toBe("waiting");
+  });
+
+  it("reads the concurrent-session limit drawn over the composer as waiting", () => {
+    // Freebuff keeps the typed message as an unsent draft behind this modal, so
+    // the session is blocked on the user rather than parked at the prompt.
+    const limit = [
+      "  You have reached the concurrent session limit.",
+      "  Upgrade to run two sessions at once.",
+      "╭──────────────────────────────────────────╮",
+      "│  ▍Add to the current task                │",
+      "╰──────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(limit)).toBe("waiting");
+  });
+
+  it("reads a boxed concurrent-session limit modal as waiting", () => {
+    const boxed = [
+      "╭───────── You have reached the concurrent-session limit ─────────╮",
+      "│                                                    Close ✕ │",
+      "│  Upgrade to run two sessions at once.                      │",
+      "╰─────────────────────────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(boxed)).toBe("waiting");
+  });
+
+  it("keeps a transcript line quoting (y/n) from blocking a parked session", () => {
+    // The same words further up the scrollback are output, not a question.
+    const quoted = [
+      "  The tool would have asked (y/n), but it never did.",
+      "  After that the turn ended and the session parked.",
+      "  Three more lines of recap follow this one.",
+      "  Four lines, in fact, before the composer.",
+      "╭──────────────────────────────────────────╮",
+      "│  ▍Add to the current task                │",
+      "╰──────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(quoted)).toBe("idle");
+  });
+
   it("strips colour codes before matching", () => {
     expect(stripAnsi("\u001b[1m\u001b[32mworking...\u001b[0m  ■ Esc")).toBe("working...  ■ Esc");
     expect(classifyPane("\u001b[2m working...   10s   ■ Esc\u001b[0m\n ❯ Add to the current task")).toBe("running");
