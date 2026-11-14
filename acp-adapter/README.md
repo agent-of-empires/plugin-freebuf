@@ -83,7 +83,7 @@ Scripts: `npm test` (node's built-in test runner), `npm run typecheck`.
 A Freebuff screen is mostly not conversation. Below the transcript sits a block
 that repaints continuously (an ad box, a live status line
 (`thinking... 3s ■ Esc`), the input box, and two footer rows naming the model,
-working directory and chat. Diffing the whole screen streams all of it as
+working directory and chat). Diffing the whole screen streams all of it as
 assistant output. So `extractTranscript` (`src/screen.ts`) keeps only the
 conversation rows:
 
@@ -112,7 +112,7 @@ Bridge timing (override via `createAdapter({ bridge })`):
 | `quiescenceMs`     | `2000`   | Quiet window that ends the turn                  |
 | `echoTimeoutMs`    | `10000`  | How long to wait for the prompt echo             |
 | `maxTurnMs`        | `300000` | Hard cap for a whole turn                        |
-| `startupTimeoutMs` | `90000`  | How long to wait for the TUI to settle, then type |
+| `startupTimeoutMs` | `90000`  | Wait for the TUI to settle, then type            |
 
 ## Resuming a conversation
 
@@ -122,7 +122,9 @@ replay messages into a fresh TUI: it reopens the chat the TUI already has.
 `initialize` advertises `loadSession: true`, and `session/load`:
 
 1. starts a pane with `freebuff --continue --cwd <cwd>`, which reopens the most
-   recent chat of that directory;
+   recent chat of that directory. With `FREEBUFF_ACP_COMMAND` set the command is
+   started as it was given, so the flag is not added and only the picker below
+   can reopen the recorded chat;
 2. compares the chat title in the footer (`· Chat: <title>`) with the title
    recorded for this session. A directory can hold several chats (including one
    from another session), and `--continue` picks the newest, so a mismatch makes
@@ -137,9 +139,10 @@ when the session is busy (a turn, a resume or another load is in flight). Those
 refusals exist so a load cannot settle on a chat the host did not ask for.
 
 The record (`cwd` plus chat title, one small JSON file per session id under
-`$FREEBUFF_ACP_STATE_DIR` or `~/.cache/freebuff-acp/sessions/`) is rewritten
-when `session/new` runs, at the end of each turn (Freebuff renames a chat after
-its first prompt), and after a `session/load` has settled on a chat.
+`$FREEBUFF_ACP_STATE_DIR/sessions/`, `~/.cache/freebuff-acp/sessions/` by
+default) is rewritten when `session/new` runs, at the end of each turn
+(Freebuff renames a chat after its first prompt), and after a `session/load`
+has settled on a chat.
 
 A prompt that arrives while the resume is still navigating waits for it
 (`SessionState.resuming`): hosts wake a resumed session with a prompt
@@ -206,13 +209,16 @@ This adapter sees pixels, not events. Specifically:
   shorter because the picker truncated it at its column width. A shorter row
   only counts when it is at least 16 characters long, so a different chat that
   merely starts the same way (`Fix` for a recorded `Fix tests`) is refused
-  rather than guessed at. What remains is two chats in one directory with
-  identical full titles (the first exact row wins), a shorter chat whose name is
-  a prefix of a recorded title and 16 characters or longer, and a chat renamed
-  by hand, which no longer matches its record. The conversation itself is whatever Freebuff
-  restores; the adapter cannot inspect it. A load whose recorded title is not
-  visible in the directory's history is refused rather than replaying another
-  chat.
+  rather than guessed at. The pick is checked as well: the footer is re-read
+  after it, and the load is refused unless that title matches the record
+  exactly, so choosing a row that turns out to be a different chat ends in a
+  refusal rather than in the wrong conversation. What survives is two chats in
+  one directory with identical full titles (the first exact row wins, and no
+  title can tell them apart), and a chat renamed by hand, whose new title no
+  longer matches its record and so can no longer be resumed. The conversation
+  itself is whatever Freebuff restores; the adapter cannot inspect it. A load
+  whose recorded title is not visible in the directory's history is refused
+  rather than replaying another chat.
 - **Replay covers one viewport, and its roles are inferred.** `session/load`
   replays the restored chat from a single pane capture, so turns hidden above
   the visible rows (behind Freebuff's `Load previous messages`) are not replayed
