@@ -98,7 +98,9 @@ describe("runTurn", () => {
 
     assert.equal(result.stopReason, "end_turn");
     assert.equal(enters, 2, "a dropped submit must be retried");
-    assert.deepEqual(sink.chunks, ["doing it"]);
+    // The status line and the answer both appear after the prompt was typed, so
+    // both are this turn's output: skipping either would be output loss.
+    assert.deepEqual(sink.chunks, ["thinking... ■ Esc\ndoing it"]);
   });
 
   it("fails the turn when the pane never accepts the submit", async () => {
@@ -106,6 +108,8 @@ describe("runTurn", () => {
     const pane = new FakePane(meta, "boot");
     const sink = collect();
     let enters = 0;
+    // Astral character: the cleanup must count characters, not UTF-16 units.
+    const promptText = "do 😀";
     pane.onSend = (keys) => {
       if (keys === "Enter") {
         enters += 1; // every press is swallowed
@@ -117,11 +121,109 @@ describe("runTurn", () => {
     // A prompt left in the composer is a failed submission, never a turn that
     // ran: reporting `end_turn` here is what makes the bug so hard to see.
     await assert.rejects(
-      runTurn({ pane, promptText: "do it", config: testConfig(clock), events: sink.events }),
+      runTurn({ pane, promptText, config: testConfig(clock), events: sink.events }),
       /was not submitted/,
     );
     assert.equal(enters, MAX_SUBMIT_ATTEMPTS, "retries stay bounded");
     assert.deepEqual(sink.chunks, []);
+    const backspaces = pane.sent.filter((entry) => entry.keys === "BSpace").length;
+    assert.equal(
+      backspaces,
+      Array.from(promptText).length,
+      "a failed turn must not leave its draft for the next one to submit",
+    );
+  });
+
+  it("clears the draft when cancelled while the submit is unconfirmed", async () => {
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, "boot");
+    let cancelled = false;
+    const promptText = "do 😀";
+    const events = {
+      onChunk: () => {},
+      onNotice: () => {},
+      isCancelled: () => cancelled,
+    };
+    pane.onSend = (keys, options) => {
+      if (options?.literal) {
+        pane.screen = `boot\n> ${keys}`; // the draft is in the composer
+      }
+      // Enter is swallowed, so the composer still holds the draft when the
+      // cancel arrives during the retry loop.
+    };
+    clock.onAdvance = (time) => {
+      if (time >= 300) cancelled = true;
+    };
+
+    const result = await runTurn({ pane, promptText, config: testConfig(clock), events });
+
+    assert.equal(result.stopReason, "cancelled");
+    const backspaces = pane.sent.filter((entry) => entry.keys === "BSpace").length;
+    assert.equal(
+      backspaces,
+      Array.from(promptText).length,
+      "a cancelled turn must not leave its draft for the next one to submit",
+    );
+  });
+
+  it("does not clear text it did not type once the turn is writing", async () => {
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, "boot");
+    let cancelled = false;
+    const events = {
+      onChunk: () => {},
+      onNotice: () => {},
+      isCancelled: () => cancelled,
+    };
+    pane.onSend = (keys, options) => {
+      if (options?.literal) {
+        pane.screen = `boot\n> ${keys}`;
+        return;
+      }
+      if (keys === "Enter") pane.screen = "boot\n> go\nworking";
+    };
+    // Cancel while the turn is streaming: the prompt is long gone from the
+    // composer, so backspaces would delete the turn's own output.
+    clock.onAdvance = (time) => {
+      if (time >= 300) cancelled = true;
+    };
+
+    const result = await runTurn({ pane, promptText: "go", config: testConfig(clock), events });
+
+    assert.equal(result.stopReason, "cancelled");
+    assert.equal(
+      pane.sent.filter((entry) => entry.keys === "BSpace").length,
+      0,
+      "a submitted prompt is no longer in the composer to clear",
+    );
+  });
+
+  it("waits the whole submit budget for an Enter that lands late", async () => {
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, "boot");
+    const sink = collect();
+    let enters = 0;
+    let reacted = false;
+    pane.onSend = (keys, options) => {
+      if (options?.literal) {
+        pane.screen = "boot\n> go";
+        return;
+      }
+      if (keys === "Enter") enters += 1; // swallowed until the late reaction below
+    };
+    clock.onAdvance = (time) => {
+      if (time >= 450 && !reacted) {
+        reacted = true;
+        pane.screen = "boot\n> go\nworking";
+      }
+    };
+
+    const result = await runTurn({ pane, promptText: "go", config: testConfig(clock), events: sink.events });
+
+    // At the poll interval the three presses would be spent by ~350ms and the
+    // turn would fail while this pane was still about to accept the first one.
+    assert.equal(result.stopReason, "end_turn");
+    assert.equal(enters, 2, "a late submit must be waited out, not declared failed");
   });
 
   it("waits out the paste window before submitting", async () => {
