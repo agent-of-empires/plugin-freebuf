@@ -188,6 +188,19 @@ describe("pane classification", () => {
     expect(classifyPane(asking.replace(" working...  2m 04s   ■ Esc\n", ""))).toBe("idle");
   });
 
+  it("reads a question dialog whose body mentions clicking Close", () => {
+    // A body row can carry the close words too; only a caption over the row
+    // opens a dialog, so the scan keeps looking rather than giving up.
+    const mentioning = [
+      "╭────────────── Some questions for you ──────────────╮",
+      "│                                          Close ✕ │",
+      "│ ▼ How should the dialog be dismissed?            │",
+      "│   Click Close ✕ in the top right, or press Esc    │",
+      "╰──────────────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(mentioning)).toBe("waiting");
+  });
+
   it("prefers a dialog over the working line it was drawn across", () => {
     expect(classifyPane(`${RUNNING_PANE}\n${WAITING_PANE}`)).toBe("waiting");
   });
