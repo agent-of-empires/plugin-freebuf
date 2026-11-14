@@ -38,6 +38,15 @@ const IDLE_PANE = [
   " ← for history · ? for help",
 ].join("\n");
 
+/** Freebuff's failure surface, drawn in place of the composer like the question panel. */
+const ERROR_PANE = [
+  "     Row badge becomes one status icon/glyph tinted by workflow state, and the",
+  "╭────────────── Error ──────────────╮",
+  "│                        Close ✕ │",
+  "│ The agent step failed: request timed out.     │",
+  "╰───────────────────────────────────────────╯",
+].join("\n");
+
 describe("pane classification", () => {
   it("reads a blocking question modal as waiting", () => {
     expect(classifyPane(WAITING_PANE)).toBe("waiting");
@@ -245,6 +254,10 @@ describe("pane classification", () => {
       "╰──────────────────────────────────────────╯",
     ].join("\n");
     expect(classifyPane(prose)).toBe("idle");
+  });
+
+  it("reads an error dialog as error, not as a question", () => {
+    expect(classifyPane(ERROR_PANE)).toBe("error");
   });
 
   it("prefers a dialog over the working line it was drawn across", () => {
