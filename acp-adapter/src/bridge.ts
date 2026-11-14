@@ -168,6 +168,9 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
     // late, rather than failing the turn before the budget is spent.
     if (submitAttempts >= MAX_SUBMIT_ATTEMPTS) continue;
     if (config.now() - lastSubmitAt < retryIntervalMs) continue;
+    // A press at the deadline would never be observed: the loop exits straight
+    // after it, so a pane that accepted it would still be reported as failed.
+    if (config.now() >= submitDeadline) continue;
     submitAttempts += 1;
     lastSubmitAt = config.now();
     await pane.send(SUBMIT_KEY);

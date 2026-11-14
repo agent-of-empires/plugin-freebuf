@@ -198,6 +198,39 @@ describe("runTurn", () => {
     );
   });
 
+  it("never presses Enter at the submit deadline", async () => {
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, "boot");
+    const sink = collect();
+    const enterTimes: number[] = [];
+    pane.onSend = (keys, options) => {
+      if (options?.literal) {
+        pane.screen = `boot\n> ${keys}`;
+        return;
+      }
+      if (keys === "Enter") enterTimes.push(clock.time);
+    };
+
+    // A poll this coarse lands a sleep exactly on the deadline, so a press there
+    // would never be observed before the turn gives up.
+    await assert.rejects(
+      runTurn({
+        pane,
+        promptText: "go",
+        config: testConfig(clock, { pollIntervalMs: 1_000, echoTimeoutMs: 2_000 }),
+        events: sink.events,
+      }),
+      /was not submitted/,
+    );
+
+    const deadline = 150 + 2_000;
+    assert.ok(enterTimes.length > 0, "the submit is at least attempted");
+    assert.ok(
+      enterTimes.every((time) => time < deadline),
+      `a press at or after the deadline is unobservable: ${JSON.stringify(enterTimes)}`,
+    );
+  });
+
   it("waits the whole submit budget for an Enter that lands late", async () => {
     const clock = new FakeClock();
     const pane = new FakePane(meta, "boot");
