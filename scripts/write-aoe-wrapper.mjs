@@ -12,7 +12,7 @@ function shQuote(value) {
 
 const root = process.cwd();
 const node = process.execPath;
-const entrypoint = resolve(root, "dist/index.js");
+const entrypoint = resolve(root, ".aoe-build/dist/index.js");
 const out = resolve(root, ".aoe-build/node/bin/aoe-freebuf-worker");
 
 mkdirSync(dirname(out), { recursive: true });
