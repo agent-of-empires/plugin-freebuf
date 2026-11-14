@@ -1,6 +1,6 @@
 {
   "name": "aoe-freebuf",
-  "version": "0.2.0",
+  "version": "0.1.0",
   "description": "An Agent of Empires plugin for the FreeBuff coding agent.",
   "type": "module",
   "license": "MIT",

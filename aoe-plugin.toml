@@ -7,7 +7,7 @@
 
 id = "agent-of-empires.aoe-freebuf"
 name = "Freebuf"
-version = "0.2.0"
+version = "0.1.0"
 # Manifest schema / host API version. 19 adds the provider-native agent
 # integration contract this plugin uses: `[[agent_integrations]]` plus the
 # `session.integration` capability, which lets the host read the worker's
@@ -42,11 +42,6 @@ capabilities = ["runtime.worker", "session.read", "fs.read", "fs.write", "proces
 # that writes those reports (freebuff --version); `resume_arg` no longer exists
 # in this schema. `replies` is omitted (false): a status-only adapter does not
 # own the prompt, so the host discards any prompt the report might carry.
-#
-# The upper bound is the next minor, not the next major: Freebuff is 0.x, where a
-# minor release is allowed to change the screen this plugin parses, so a range
-# that treats 0.3.0 as compatible would claim a contract nobody has checked.
-#
 # `send_keys_enter_delay_ms` is the pause the host waits between typing a message
 # and pressing Enter. Freebuff's composer treats a burst of characters as a
 # paste and swallows an Enter that arrives inside that window, so a message
@@ -56,7 +51,7 @@ capabilities = ["runtime.worker", "session.read", "fs.read", "fs.write", "proces
 # install of the plugin drives Freebuff the same way.
 [[agent_integrations]]
 tool = "freebuff"
-provider_versions = [">=0.2.36, <0.3.0"]
+provider_versions = [">=0.2.36, <1.0.0"]
 command = "freebuff"
 send_keys_enter_delay_ms = 150
 

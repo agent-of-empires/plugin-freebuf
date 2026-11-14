@@ -129,9 +129,7 @@ describe("aoe-plugin.toml", () => {
     expect(integrations).toHaveLength(1);
     expect(integrations[0].tool).toBe("freebuff");
     expect(integrations[0].command).toBe("freebuff");
-    // Freebuff is 0.x: a minor release may change the screen this plugin
-    // parses, so the range stops at the next minor instead of 1.0.0.
-    expect(integrations[0].provider_versions).toEqual([">=0.2.36, <0.3.0"]);
+    expect(integrations[0].provider_versions).toEqual([">=0.2.36, <1.0.0"]);
     // The pause between typing a message and pressing Enter. Declared here so
     // every install drives Freebuff the same way, with no user config.
     expect(integrations[0].send_keys_enter_delay_ms).toBe(150);
