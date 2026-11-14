@@ -72,7 +72,15 @@ const DIALOG_TOP = /^[ \t]*╭─+[ \t]+(.*?)[ \t]+─+╮[ \t]*$/;
 const DIALOG_CLOSE_ROW = /^[ \t]*│.*Close ✕.*│[ \t]*$/;
 
 /** Captions of the dialogs that block on the user. */
-const WAITING_DIALOG = /Some questions for you|Do you want to (?:proceed|allow|continue)/i;
+const WAITING_DIALOG = /Some questions for you|Do you want to (?:proceed|allow|continue)|concurrent[- ]session limit/i;
+
+/**
+ * A confirmation asked at the composer instead of in a boxed dialog: the inline
+ * `(y/n)` prompts, and the modal Freebuff draws instead of delivering a message
+ * once the account is over its concurrent-session limit.
+ */
+const INLINE_PROMPT = /^[ \t]*(?:\(y\/n\)|\[y\/N\]|Do you want to (?:proceed|allow|continue)|You have reached the concurrent[- ]session limit)/i;
+
 
 /** Freebuff's live turn status line. */
 const STATUS_LINE = /^[ \t]*(?:working|thinking)\.\.\.[^\n]*■[ \t]*Esc\b[ \t]*$/;
@@ -196,11 +204,39 @@ function blockedOn(lines: readonly string[]): PaneState | null {
   return null; // an unrecognised dialog is not a verdict; the composer decides
 }
 
+/** How many text rows above the composer a prompt may be drawn in. */
+const PROMPT_ROWS = 3;
+
+/**
+ * True when a confirmation prompt is asked at the composer.
+ *
+ * An inline prompt only counts near the composer, where the question is put to
+ * the user: a transcript line quoting `(y/n)`, or prose about the session
+ * limit, sits further up the scrollback than the rows just above the input, and
+ * a live-turn status line ends the walk because the turn is not blocked.
+ */
+function promptAtComposer(lines: readonly string[]): boolean {
+  for (let anchor = lines.length - 1; anchor >= 0; anchor -= 1) {
+    const line = lines[anchor];
+    if (!(PROMPT_LINE.test(line) || INPUT_BOX_TOP.test(line) || isQueuedPanel(lines, anchor))) continue;
+    let rows = 0;
+    for (let up = anchor - 1; up >= 0 && up >= anchor - MAX_CHROME_ROWS && rows < PROMPT_ROWS; up -= 1) {
+      const row = lines[up];
+      if (CHROME_ROW.test(row)) continue;
+      if (STATUS_LINE.test(row)) break;
+      if (INLINE_PROMPT.test(row)) return true;
+      rows += 1;
+    }
+  }
+  return false;
+}
+
 /** Classify a captured pane. Unrecognised content is the idle prompt. */
 export function classifyPane(text: string): PaneState {
   const lines = stripAnsi(text).split(/\r?\n/);
   const blocked = blockedOn(lines);
   if (blocked !== null) return blocked;
+  if (promptAtComposer(lines)) return "waiting";
   if (statusAbovePrompt(lines)) return "running";
   return "idle";
 }
