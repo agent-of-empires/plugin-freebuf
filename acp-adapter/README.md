@@ -70,7 +70,9 @@ Scripts: `npm test` (node's built-in test runner), `npm run typecheck`.
 5. When the screen has been unchanged for the quiescence window, it answers
    the prompt with `stopReason: "end_turn"`.
 6. `session/cancel` sends the interrupt key (`C-c`) and the running turn
-   answers `stopReason: "cancelled"`.
+   answers `stopReason: "cancelled"`. A turn cancelled before it was submitted
+   deletes the text it typed, so the next prompt does not start from a stale
+   draft in the composer.
 
 Bridge timing (override via `createAdapter({ bridge })`):
 
@@ -80,7 +82,7 @@ Bridge timing (override via `createAdapter({ bridge })`):
 | `quiescenceMs`    | `2000`   | Quiet window that ends the turn             |
 | `echoTimeoutMs`   | `2000`   | How long to wait for the prompt echo        |
 | `maxTurnMs`       | `300000` | Hard cap for a whole turn                   |
-| `submitDelayMs`   | `150`    | Pause before `Enter`, so it is not read as paste |
+| `submitDelayMs`   | `150`    | Wait out the paste window before `Enter`    |
 
 ## Limitations of a TUI bridge
 

@@ -14,6 +14,7 @@ import type { PaneSource } from "./pane.ts";
 
 export const INTERRUPT_KEY = "C-c";
 export const SUBMIT_KEY = "Enter";
+const CLEAR_KEY = "BSpace";
 
 export type BridgeConfig = {
   /** Delay between `capture-pane` polls. */
@@ -120,6 +121,10 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
   // A cancel during the pause must not be followed by a submit: the user asked
   // for the turn to stop, and pressing Enter would start one anyway.
   if (events.isCancelled()) {
+    // The prompt is already typed, so stopping here would leave a draft in the
+    // composer, and the next turn's prompt would be typed onto it and submitted
+    // together with it.
+    await clearTypedPrompt(pane, Array.from(promptText).length);
     return { stopReason: "cancelled", streamedChars };
   }
   await pane.send(SUBMIT_KEY);
@@ -195,4 +200,19 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
 
 function normalizeJoined(raw: string): string {
   return normalizeScreen(raw).join("\n");
+}
+
+/**
+ * Delete the text this turn typed, so a stopped turn leaves no draft behind.
+ *
+ * The prompt is then known exactly -- it is what this turn typed -- so removing
+ * it one character at a time needs no assumption about a clear-line binding the
+ * TUI may not have. The count is in code points, not `String.length`: a prompt
+ * holding an astral character such as an emoji would otherwise get two
+ * backspaces for one character and delete text typed before this turn.
+ */
+async function clearTypedPrompt(pane: PaneSource, length: number): Promise<void> {
+  for (let i = 0; i < length; i += 1) {
+    await pane.send(CLEAR_KEY);
+  }
 }

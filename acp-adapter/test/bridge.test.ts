@@ -92,11 +92,14 @@ describe("runTurn", () => {
     );
   });
 
-  it("does not submit a prompt cancelled during the paste window", async () => {
+  it("does not submit and clears the draft when cancelled during the paste window", async () => {
     const clock = new FakeClock();
     const pane = new FakePane(meta, "boot");
     let cancelled = false;
     let enters = 0;
+    // Two code units for one character: counting UTF-16 units would clear one
+    // character too many and delete text typed before this turn.
+    const promptText = "go 😀";
     const events = {
       onChunk: () => {},
       onNotice: () => {},
@@ -110,10 +113,16 @@ describe("runTurn", () => {
       if (time >= 150) cancelled = true;
     };
 
-    const result = await runTurn({ pane, promptText: "go", config: testConfig(clock), events });
+    const result = await runTurn({ pane, promptText, config: testConfig(clock), events });
 
     assert.equal(result.stopReason, "cancelled");
     assert.equal(enters, 0, "a cancelled turn must not start a prompt");
+    const backspaces = pane.sent.filter((entry) => entry.keys === "BSpace").length;
+    assert.equal(
+      backspaces,
+      Array.from(promptText).length,
+      "the typed draft must be deleted, one backspace per character",
+    );
   });
 
   it("does not stream the TUI echo of the user's own prompt", async () => {
