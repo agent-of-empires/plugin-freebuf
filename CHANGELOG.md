@@ -16,6 +16,11 @@ The format follows [Conventional Commits](https://www.conventionalcommits.org/).
 
 ### Fixed
 
+- Blocking dialogs are found structurally, and only their caption decides: a boxed panel carrying `Close ✕` under its captioned border, with no composer drawn beneath it. A dialog replaces the composer, so a box with a composer under it is output, and a session that quotes the panel in prose, echoes it back in a prompt, or prints it from a tool no longer reads as `waiting` or raises attention. The old unscoped text rules (`Some questions for you`, a bare `Close ✕`, `Do you want to…`, `(y/n)` anywhere in the pane) are gone.
+- An error dialog (its caption says error/failed) is reported as `error` instead of as a question, so the row's own status tells the two apart.
+- Confirmation prompts outside a dialog are still `waiting`, but only where they are asked: the inline `(y/n)` prompt, `Do you want to…` and the concurrent-session limit modal count in the rows just above the composer, so the same words quoted further up the scrollback no longer block a session.
+- A tall question dialog is recognised like a short one: the caption is read from the close row just under it, not from a fixed window at the bottom of the pane.
+- A working session whose composer holds a queued message no longer reads as `idle`: `working...` / `thinking...` sits above the "Your message is saved" panel, so that panel anchors the status line the way the prompt box does.
 - A working session no longer reads as `idle`: Freebuff 0.2.36 wraps the input prompt in a rounded box, so the `working...` / `thinking...` status line is no longer directly above `❯`. The status line now counts when only the input box's borders and blank rows separate it from the prompt (a typed draft still counts), while the same words quoted in transcript prose are still ignored.
 
 ### Changed
