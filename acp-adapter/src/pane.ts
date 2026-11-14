@@ -11,6 +11,11 @@ const execFileAsync = promisify(execFile);
 export type SendOptions = {
   /** Send the keys verbatim instead of interpreting them as tmux key names. */
   literal?: boolean;
+  /**
+   * Send the same keys this many times, in one tmux call. Clearing a long draft
+   * would otherwise spawn one subprocess per character.
+   */
+  repeat?: number;
 };
 
 /**
@@ -113,7 +118,11 @@ export class TmuxPaneSource implements SessionPane {
     if (options?.literal) {
       args.push("-l");
     }
-    args.push("--", keys);
+    args.push("--");
+    // Separate arguments are separate keys, so a repeat goes in one call.
+    for (let i = 0; i < Math.max(1, options?.repeat ?? 1); i += 1) {
+      args.push(keys);
+    }
     await this.exec(args);
   }
 

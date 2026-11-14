@@ -66,7 +66,9 @@ Scripts: `npm test` (node's built-in test runner), `npm run typecheck`.
    slow pane is not given up on early; a composer that never accepts it fails
    the turn instead of reporting an `end_turn` that never ran.
 3. It waits for the TUI to echo the prompt and resets its diff baseline, so
-   the user's own text is never streamed back as assistant output.
+   the user's own text is never streamed back as assistant output. The live-turn
+   status line the TUI draws (`thinking... ■ Esc`) is dropped for the same
+   reason: it is chrome, not assistant output.
 4. It polls `tmux capture-pane -p -e`, strips ANSI escapes, diffs the
    normalized screen against the previous one, and emits each new piece of
    text as a `session/update` with `agent_message_chunk`.

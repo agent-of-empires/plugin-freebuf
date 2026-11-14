@@ -42,6 +42,16 @@ function collect() {
   };
 }
 
+/**
+ * Total backspaces the bridge asked for, counting a batched send as the repeat
+ * count it carries rather than as one press.
+ */
+function clearPresses(pane: FakePane): number {
+  return pane.sent
+    .filter((entry) => entry.keys === "BSpace")
+    .reduce((total, entry) => total + (entry.options?.repeat ?? 1), 0);
+}
+
 describe("runTurn", () => {
   it("types the prompt literally, submits it, and streams only new output", async () => {
     const clock = new FakeClock();
@@ -98,9 +108,9 @@ describe("runTurn", () => {
 
     assert.equal(result.stopReason, "end_turn");
     assert.equal(enters, 2, "a dropped submit must be retried");
-    // The status line and the answer both appear after the prompt was typed, so
-    // both are this turn's output: skipping either would be output loss.
-    assert.deepEqual(sink.chunks, ["thinking... ■ Esc\ndoing it"]);
+    // The answer appears after the prompt was typed, so it is this turn's
+    // output and must survive the echo handling.
+    assert.deepEqual(sink.chunks, ["doing it"]);
   });
 
   it("fails the turn when the pane never accepts the submit", async () => {
@@ -126,9 +136,8 @@ describe("runTurn", () => {
     );
     assert.equal(enters, MAX_SUBMIT_ATTEMPTS, "retries stay bounded");
     assert.deepEqual(sink.chunks, []);
-    const backspaces = pane.sent.filter((entry) => entry.keys === "BSpace").length;
     assert.equal(
-      backspaces,
+      clearPresses(pane),
       Array.from(promptText).length,
       "a failed turn must not leave its draft for the next one to submit",
     );
@@ -158,9 +167,8 @@ describe("runTurn", () => {
     const result = await runTurn({ pane, promptText, config: testConfig(clock), events });
 
     assert.equal(result.stopReason, "cancelled");
-    const backspaces = pane.sent.filter((entry) => entry.keys === "BSpace").length;
     assert.equal(
-      backspaces,
+      clearPresses(pane),
       Array.from(promptText).length,
       "a cancelled turn must not leave its draft for the next one to submit",
     );
@@ -191,11 +199,7 @@ describe("runTurn", () => {
     const result = await runTurn({ pane, promptText: "go", config: testConfig(clock), events });
 
     assert.equal(result.stopReason, "cancelled");
-    assert.equal(
-      pane.sent.filter((entry) => entry.keys === "BSpace").length,
-      0,
-      "a submitted prompt is no longer in the composer to clear",
-    );
+    assert.equal(clearPresses(pane), 0, "a submitted prompt is no longer in the composer to clear");
   });
 
   it("never presses Enter at the submit deadline", async () => {
@@ -259,6 +263,89 @@ describe("runTurn", () => {
     assert.equal(enters, 2, "a late submit must be waited out, not declared failed");
   });
 
+  it("keeps waiting for a late submit after the last press", async () => {
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, "boot");
+    const sink = collect();
+    let enters = 0;
+    pane.onSend = (keys) => {
+      if (keys === "Enter") {
+        enters += 1;
+        return; // every press looks swallowed until the pane repaints
+      }
+      pane.screen = `boot\n> ${keys}`;
+    };
+    // The pane accepts the prompt after the third press, but still inside
+    // echoTimeoutMs: that is a submitted turn, not a failed one.
+    clock.onAdvance = (time) => {
+      if (time >= 1_000) {
+        pane.screen = "boot\n> go\nthinking... ■ Esc\ndone";
+      }
+    };
+
+    const result = await runTurn({
+      pane,
+      promptText: "go",
+      config: testConfig(clock, { echoTimeoutMs: 1_200 }),
+      events: sink.events,
+    });
+
+    assert.equal(result.stopReason, "end_turn");
+    assert.equal(enters, MAX_SUBMIT_ATTEMPTS, "no further presses after the cap");
+    assert.ok(sink.chunks.join("\n").includes("done"), "the turn still streams its output");
+  });
+
+  it("clears the typed prompt before failing the turn", async () => {
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, "boot");
+    const sink = collect();
+    pane.onSend = (keys) => {
+      if (keys !== "Enter" && keys !== "BSpace") {
+        pane.screen = `boot\n> ${keys}`;
+      }
+    };
+
+    await assert.rejects(
+      runTurn({ pane, promptText: "do it", config: testConfig(clock), events: sink.events }),
+      /was not submitted/,
+    );
+
+    // A draft left in the composer would be submitted with the next prompt.
+    assert.equal(
+      pane.sent.filter((entry) => entry.keys === "BSpace").length,
+      1,
+      "the whole draft is cleared in one call, not one subprocess per character",
+    );
+    assert.equal(clearPresses(pane), "do it".length, "every typed character is deleted again");
+  });
+
+  it("streams output that arrived before the echo was seen", async () => {
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, "boot");
+    const sink = collect();
+    pane.onSend = (keys, options) => {
+      if (options?.literal) {
+        pane.screen = `boot\n> ${keys}`;
+        return;
+      }
+      // Enter is accepted at once and the first capture after it already holds
+      // the reply: taking that capture as the baseline would drop the reply.
+      pane.screen = "boot\n> go\nthinking... ■ Esc\nhere is the answer";
+    };
+
+    const result = await runTurn({ pane, promptText: "go", config: testConfig(clock), events: sink.events });
+
+    assert.equal(result.stopReason, "end_turn");
+    const streamed = sink.chunks.join("\n");
+    assert.ok(
+      streamed.includes("here is the answer"),
+      `the reply must be streamed, got ${JSON.stringify(sink.chunks)}`,
+    );
+    // The live-turn status line is chrome, not assistant output.
+    assert.equal(streamed.includes("Esc"), false, `status chrome leaked: ${streamed}`);
+    assert.equal(streamed.includes("> go"), false, `prompt echo leaked: ${streamed}`);
+  });
+
   it("waits out the paste window before submitting", async () => {
     const clock = new FakeClock();
     const pane = new FakePane(meta, "boot");
@@ -305,9 +392,8 @@ describe("runTurn", () => {
 
     assert.equal(result.stopReason, "cancelled");
     assert.equal(enters, 0, "a cancelled turn must not start a prompt");
-    const backspaces = pane.sent.filter((entry) => entry.keys === "BSpace").length;
     assert.equal(
-      backspaces,
+      clearPresses(pane),
       Array.from(promptText).length,
       "the typed draft must be deleted, one backspace per character",
     );

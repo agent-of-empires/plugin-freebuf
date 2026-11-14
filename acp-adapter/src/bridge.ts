@@ -164,8 +164,10 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
       submitted = true; // the TUI reacted: the prompt left the composer
       break;
     }
-    // Out of attempts: keep watching until the deadline, in case a press lands
-    // late, rather than failing the turn before the budget is spent.
+    // Out of presses, but not out of time: a pane that repaints late still
+    // accepted the prompt, and reporting it as a failure would be wrong. Keep
+    // watching until the deadline rather than failing the turn before the
+    // budget is spent.
     if (submitAttempts >= MAX_SUBMIT_ATTEMPTS) continue;
     if (config.now() - lastSubmitAt < retryIntervalMs) continue;
     // A press at the deadline would never be observed: the loop exits straight
@@ -185,8 +187,8 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
   // check would match the prompt in the composer, the screen would then stay
   // still, and the turn would report `end_turn` for work that never started.
   if (!submitted) {
-    // Leaving the draft behind would corrupt the next turn: its prompt would be
-    // typed after it and one Enter would submit both.
+    // Leave the composer as this turn found it. The next turn types its prompt
+    // into the same composer, so a draft left here would be submitted with it.
     await clearDraft(pane, promptText, typedView);
     throw new RequestError(
       -32000,
@@ -197,7 +199,12 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
   // Wait for the TUI to echo the prompt so it is not streamed back as
   // assistant output. If no echo ever appears, the original baseline is kept
   // and nothing is skipped.
-  const promptNeedle = promptText.split("\n")[0].trim();
+  const promptLines = promptText
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  const promptNeedle = promptLines[0] ?? "";
+  let skipEcho = false;
   const echoDeadline = config.now() + config.echoTimeoutMs;
   while (config.now() < echoDeadline) {
     if (events.isCancelled()) {
@@ -205,11 +212,12 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
     }
     const screen = await pane.capture();
     if (promptNeedle !== "" && normalizeJoined(screen).includes(promptNeedle)) {
-      // When the prompt was already in the composer at submit time, everything
-      // else on screen now is output this turn wrote, so the baseline goes back
-      // to the typed view. Resetting to the current screen would drop it, which
-      // on a slow pane is the turn's first output.
-      tracker.reset(typedView.includes(promptNeedle) ? typedScreen : screen);
+      // Reset to the screen from before the submit, not to this one: anything
+      // the TUI painted between Enter and this capture is real output, and
+      // taking this capture as the baseline would swallow it. The echo and the
+      // status line then show up as a delta, which the first update below drops.
+      tracker.reset(typedScreen);
+      skipEcho = true;
       break;
     }
     await config.sleep(config.pollIntervalMs);
@@ -228,7 +236,9 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
     }
 
     const screen = await pane.capture();
-    const delta = tracker.update(screen);
+    const fresh = tracker.update(screen);
+    const delta = skipEcho ? dropEchoLines(fresh, promptLines) : fresh;
+    skipEcho = false;
     if (delta !== "") {
       // New screen lines carry a leading newline for reconstruction; the very
       // first one has nothing before it, so drop the separator.
@@ -296,7 +306,31 @@ async function clearDraft(
     return;
   }
   const length = Array.from(promptText).length;
-  for (let i = 0; i < length; i += 1) {
-    await pane.send(CLEAR_KEY);
+  if (length === 0) {
+    return;
   }
+  // One call, not one per character: a long draft would otherwise spawn a tmux
+  // subprocess per character and hold the error path up for seconds.
+  await pane.send(CLEAR_KEY, { repeat: length });
+}
+
+/** The marker the composer and the transcript draw in front of a user turn. */
+const ECHO_MARKER = /^[>\u276f\u258d]\s*/;
+
+/** The live-turn status line, which is chrome rather than assistant output. */
+const STATUS_CHROME = /(?:working|thinking)\.\.\.\s*\u25a0\s*Esc/;
+
+/**
+ * Drop what the TUI paints for the turn itself -- the echoed prompt and the
+ * status line -- from the first delta after the echo, which the pre-submit
+ * baseline makes visible.
+ */
+function dropEchoLines(delta: string, promptLines: readonly string[]): string {
+  return delta
+    .split("\n")
+    .filter((line) => {
+      if (STATUS_CHROME.test(line)) return false;
+      return !promptLines.includes(line.trim().replace(ECHO_MARKER, "").trim());
+    })
+    .join("\n");
 }
