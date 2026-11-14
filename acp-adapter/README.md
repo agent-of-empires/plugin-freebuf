@@ -61,7 +61,10 @@ Scripts: `npm test` (node's built-in test runner), `npm run typecheck`.
    prompt containing `Enter` is not interpreted as a keypress), waits out the
    TUI's paste window, then presses `Enter`. Sent in one burst the `Enter` is
    read as part of a paste and dropped, which leaves the prompt typed in the
-   composer with no turn running.
+   composer with no turn running. If the pane does not react, the press is
+   retried, up to three in total, spaced across the whole `echoTimeoutMs` so a
+   slow pane is not given up on early; a composer that never accepts it fails
+   the turn instead of reporting an `end_turn` that never ran.
 3. It waits for the TUI to echo the prompt and resets its diff baseline, so
    the user's own text is never streamed back as assistant output.
 4. It polls `tmux capture-pane -p -e`, strips ANSI escapes, diffs the
