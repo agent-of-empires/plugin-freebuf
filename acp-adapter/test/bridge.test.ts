@@ -153,6 +153,65 @@ describe("runTurn", () => {
     assert.ok(streamed.includes("PLUM"), "the answer drawn with the echo was dropped");
   });
 
+  it("does not stream a half-drawn echo when the window closes mid-prompt", async () => {
+    // A multi-line prompt is echoed one row at a time. When the echo window runs
+    // out after the first row, that row looked like ordinary new output and was
+    // streamed; a streamed chunk cannot be retracted once the echo completes.
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, composerScreen("boot"));
+    const sink = collect();
+    clock.onAdvance = (time) => {
+      if (time >= 600) {
+        pane.screen = composerScreen("boot", "   [03:52 PM]", "   remember the word PLUM");
+      }
+      if (time >= 1_500) {
+        pane.screen = composerScreen(
+          "boot",
+          "   [03:52 PM]",
+          "   remember the word PLUM",
+          "   and keep it",
+          "",
+          "  PLUM",
+        );
+      }
+    };
+
+    await runTurn({
+      pane,
+      promptText: "remember the word PLUM\nand keep it",
+      config: testConfig(clock, { echoTimeoutMs: 500 }),
+      events: sink.events,
+    });
+
+    const streamed = sink.chunks.join("\n");
+    assert.equal(streamed.includes("remember the word PLUM"), false, "half-drawn echo leaked into output");
+    assert.equal(streamed.includes("and keep it"), false, "echo tail leaked into output");
+    assert.equal(streamed.includes("PLUM"), true, "the answer that followed the echo was dropped");
+  });
+
+  it("still suppresses an echo whose tail never arrives", async () => {
+    // Buffering a partial echo must not turn into streaming it once the turn is
+    // over: waiting is the only way to keep the drawn rows out of the transcript.
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, composerScreen("boot"));
+    const sink = collect();
+    clock.onAdvance = (time) => {
+      if (time >= 600) {
+        pane.screen = composerScreen("boot", "   [03:52 PM]", "   remember the word PLUM");
+      }
+    };
+
+    const result = await runTurn({
+      pane,
+      promptText: "remember the word PLUM\nand keep it",
+      config: testConfig(clock, { echoTimeoutMs: 500, maxTurnMs: 2_000 }),
+      events: sink.events,
+    });
+
+    assert.equal(result.stopReason, "end_turn");
+    assert.equal(sink.chunks.join("\n").includes("remember the word PLUM"), false, "partial echo leaked");
+  });
+
   it("stops with cancelled when the turn is interrupted", async () => {
     const clock = new FakeClock();
     const pane = new FakePane(meta, composerScreen("boot"));

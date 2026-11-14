@@ -188,11 +188,19 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
     const delta = diffScreens(baselineRows, extractTranscript(screen));
     return delta === "" ? [] : delta.split("\n");
   };
-  // Null while the echo is not visible yet or still being drawn; otherwise the
-  // rows after the complete echo (an answer can be drawn in the same capture,
-  // and it has to be streamed).
-  const rowsAfterEcho = (screen: string): string[] | null => {
-    if (echoNeedle === "") return null;
+  // An absent echo and a half-drawn one look the same to a null return, but they
+  // have to be told apart: nothing may be streamed while the echo is partial
+  // (the user's own words would go out as assistant output and a streamed chunk
+  // cannot be retracted), while an echo that never appears must fall back to
+  // streaming everything. `after` is the rows following what has been drawn of
+  // the echo (an answer can arrive in the same capture as the echo and has to be
+  // streamed).
+  type EchoScan =
+    | { state: "absent" }
+    | { state: "partial"; after: string[] }
+    | { state: "complete"; after: string[] };
+  const scanEcho = (screen: string): EchoScan => {
+    if (echoNeedle === "") return { state: "absent" };
     const rows = rowsSinceBaseline(screen);
     let seen = "";
     let start = -1;
@@ -206,7 +214,7 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
         seen = seen.slice(at + echoNeedle.length);
       }
     }
-    if (start === -1) return null;
+    if (start === -1) return { state: "absent" };
     // The remaining lines of a multi-line prompt, joined with no separator
     // because the TUI wraps mid-token: the echo is complete once the rows drawn
     // since the first line account for them in order.
@@ -218,11 +226,12 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
       last += 1;
       echoed += collapse(rows[last]);
     }
-    if (echoed === rest) return rows.slice(last + 1);
+    if (echoed === rest) return { state: "complete", after: rows.slice(last + 1) };
     if (rest.startsWith(echoed)) {
-      // The echo is still being drawn. Waiting keeps the suppressed rows whole;
-      // the echo deadline covers a prompt whose tail never appears at all.
-      return null;
+      // The echo is still being drawn. Reporting it separately keeps the drawn
+      // rows out of the stream; the main loop bounds the wait with a grace of
+      // its own in case the tail never appears at all.
+      return { state: "partial", after: rows.slice(last + 1) };
     }
     // The answer started in the same row as the last echo character: keep that
     // row's tail, which is assistant text, and drop only what came before it.
@@ -231,7 +240,7 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
     for (let dropped = 0; dropped < excess && cut > 0; cut--) {
       if (collapse(rows[last][cut - 1]) !== "") dropped += 1;
     }
-    return [rows[last].slice(cut), ...rows.slice(last + 1)];
+    return { state: "complete", after: [rows[last].slice(cut), ...rows.slice(last + 1)] };
   };
   // Still waiting for the echo: the main loop keeps watching for it, because a
   // long prompt can take longer to reach the transcript than the initial window
@@ -251,9 +260,9 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
       break;
     }
     const screen = await pane.capture();
-    const after = rowsAfterEcho(screen);
-    if (after !== null) {
-      await settleEcho(screen, after);
+    const scan = scanEcho(screen);
+    if (scan.state === "complete") {
+      await settleEcho(screen, scan.after);
       break;
     }
     await config.sleep(config.pollIntervalMs);
@@ -268,12 +277,23 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
     }
 
     const screen = await pane.capture();
-    const afterEcho = echoPending ? rowsAfterEcho(screen) : null;
-    if (afterEcho !== null) {
-      // The echo arrived after the initial window closed.
-      await settleEcho(screen, afterEcho);
-      await config.sleep(config.pollIntervalMs);
-      continue;
+    if (echoPending) {
+      const scan = scanEcho(screen);
+      if (scan.state === "complete") {
+        // The echo arrived after the initial window closed.
+        await settleEcho(screen, scan.after);
+        await config.sleep(config.pollIntervalMs);
+        continue;
+      }
+      if (scan.state === "partial") {
+        // Only part of the echo is on screen. Streaming the delta here would send
+        // the user's own words back as assistant output and cannot be undone, so
+        // the output stays buffered until the echo finishes. Nothing legitimate is
+        // held back by this: a row that continues the echo keeps matching it, and
+        // the first row that does not is the answer, which classifies as complete.
+        await config.sleep(config.pollIntervalMs);
+        continue;
+      }
     }
     await deliver(tracker.update(screen));
 
