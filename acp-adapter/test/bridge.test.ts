@@ -16,6 +16,7 @@ function testConfig(clock: FakeClock, overrides: Partial<BridgeConfig> = {}): Br
     quiescenceMs: 300,
     echoTimeoutMs: 500,
     maxTurnMs: 10_000,
+    submitDelayMs: 150,
     now: clock.now,
     sleep: clock.sleep,
     ...overrides,
@@ -68,6 +69,60 @@ describe("runTurn", () => {
     );
     assert.equal(pane.sent[0].options?.literal, true, "prompt must be sent as literal text");
     assert.equal(pane.sent[1].options?.literal, undefined);
+  });
+
+  it("waits out the paste window before submitting", async () => {
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, "boot");
+    const sink = collect();
+    const sentAt: number[] = [];
+    pane.onSend = (keys) => {
+      sentAt.push(clock.time);
+      if (keys === "Enter") {
+        pane.screen = "boot\n> go";
+      }
+    };
+
+    await runTurn({ pane, promptText: "go", config: testConfig(clock), events: sink.events });
+
+    assert.equal(sentAt.length, 2, "the prompt is submitted exactly once when the TUI accepts it");
+    assert.ok(
+      sentAt[1] - sentAt[0] >= 150,
+      `Enter must not arrive in the same burst as the text (gap ${sentAt[1] - sentAt[0]}ms)`,
+    );
+  });
+
+  it("does not submit and clears the draft when cancelled during the paste window", async () => {
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, "boot");
+    let cancelled = false;
+    let enters = 0;
+    // Two code units for one character: counting UTF-16 units would clear one
+    // character too many and delete text typed before this turn.
+    const promptText = "go 😀";
+    const events = {
+      onChunk: () => {},
+      onNotice: () => {},
+      isCancelled: () => cancelled,
+    };
+    pane.onSend = (keys) => {
+      if (keys === "Enter") enters += 1;
+    };
+    // The cancel arrives while the bridge is still waiting out the paste window.
+    clock.onAdvance = (time) => {
+      if (time >= 150) cancelled = true;
+    };
+
+    const result = await runTurn({ pane, promptText, config: testConfig(clock), events });
+
+    assert.equal(result.stopReason, "cancelled");
+    assert.equal(enters, 0, "a cancelled turn must not start a prompt");
+    const backspaces = pane.sent.filter((entry) => entry.keys === "BSpace").length;
+    assert.equal(
+      backspaces,
+      Array.from(promptText).length,
+      "the typed draft must be deleted, one backspace per character",
+    );
   });
 
   it("does not stream the TUI echo of the user's own prompt", async () => {

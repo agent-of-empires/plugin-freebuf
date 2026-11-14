@@ -58,7 +58,10 @@ Scripts: `npm test` (node's built-in test runner), `npm run typecheck`.
 1. `session/new` spawns `freebuff --cwd <cwd>` in a tmux session named after
    the ACP session id and returns that id.
 2. `session/prompt` sends the prompt as **literal** keys (`send-keys -l`, so a
-   prompt containing `Enter` is not interpreted as a keypress), then `Enter`.
+   prompt containing `Enter` is not interpreted as a keypress), waits out the
+   TUI's paste window, then presses `Enter`. Sent in one burst the `Enter` is
+   read as part of a paste and dropped, which leaves the prompt typed in the
+   composer with no turn running.
 3. It waits for the TUI to echo the prompt and resets its diff baseline, so
    the user's own text is never streamed back as assistant output.
 4. It polls `tmux capture-pane -p -e`, strips ANSI escapes, diffs the
@@ -67,7 +70,9 @@ Scripts: `npm test` (node's built-in test runner), `npm run typecheck`.
 5. When the screen has been unchanged for the quiescence window, it answers
    the prompt with `stopReason: "end_turn"`.
 6. `session/cancel` sends the interrupt key (`C-c`) and the running turn
-   answers `stopReason: "cancelled"`.
+   answers `stopReason: "cancelled"`. A turn cancelled before it was submitted
+   deletes the text it typed, so the next prompt does not start from a stale
+   draft in the composer.
 
 Bridge timing (override via `createAdapter({ bridge })`):
 
@@ -77,6 +82,7 @@ Bridge timing (override via `createAdapter({ bridge })`):
 | `quiescenceMs`    | `2000`   | Quiet window that ends the turn             |
 | `echoTimeoutMs`   | `2000`   | How long to wait for the prompt echo        |
 | `maxTurnMs`       | `300000` | Hard cap for a whole turn                   |
+| `submitDelayMs`   | `150`    | Wait out the paste window before `Enter`    |
 
 ## Limitations of a TUI bridge
 
