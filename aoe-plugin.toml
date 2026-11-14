@@ -11,10 +11,13 @@ version = "0.1.0"
 # Manifest schema / host API version. 19 adds the provider-native agent
 # integration contract this plugin uses: `[[agent_integrations]]` plus the
 # `session.integration` capability, which lets the host read the worker's
-# AgentIntegrationSnapshot as the session row's own status. The host parses
-# strictly, so a host that does not know this schema rejects the manifest
-# instead of ignoring the block; `aoe_version` is the floor that parses it.
-api_version = 19
+# AgentIntegrationSnapshot as the session row's own status. 22 adds
+# `send_keys_enter_delay_ms` to that entry, the per-agent pause between typing a
+# message and pressing Enter. The host parses strictly, so a host that does not
+# know this schema rejects the manifest instead of ignoring the block; a
+# released host therefore refuses this release rather than installing a manifest
+# whose send timing it would silently drop.
+api_version = 22
 # Host-app compatibility range (a different axis from api_version). The host
 # refuses install/update outside this range. Requires api_version >= 4.
 aoe_version = ">=1.21.0, <2.0.0"
@@ -39,10 +42,18 @@ capabilities = ["runtime.worker", "session.read", "fs.read", "fs.write", "proces
 # that writes those reports (freebuff --version); `resume_arg` no longer exists
 # in this schema. `replies` is omitted (false): a status-only adapter does not
 # own the prompt, so the host discards any prompt the report might carry.
+# `send_keys_enter_delay_ms` is the pause the host waits between typing a message
+# and pressing Enter. Freebuff's composer treats a burst of characters as a
+# paste and swallows an Enter that arrives inside that window, so a message
+# typed and submitted back to back (`m` in the session list, `aoe send`) stays an
+# unsent draft. 150 matches the delay the host already gives Claude and Codex for
+# the same reason. It is declared here, not in the user's config, so every
+# install of the plugin drives Freebuff the same way.
 [[agent_integrations]]
 tool = "freebuff"
 provider_versions = [">=0.2.36, <1.0.0"]
 command = "freebuff"
+send_keys_enter_delay_ms = 150
 
 # Commands the plugin contributes (palette / CLI), namespaced by the host as
 # plugin.agent-of-empires.aoe-freebuf.<id>. The command-id -> worker RPC mapping

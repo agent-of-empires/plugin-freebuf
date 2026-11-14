@@ -117,10 +117,11 @@ describe("aoe-plugin.toml", () => {
   const manifest = parseToml(readFileSync(MANIFEST_PATH, "utf8"));
 
   it("declares the api_version that carries the agent-integration contract", () => {
-    // 19 adds [[agent_integrations]] and the session.integration capability.
-    // The host parses this strictly, so a host below aoe_version rejects the
-    // manifest rather than silently ignoring the block.
-    expect(manifest.root.api_version).toBe(19);
+    // 19 adds [[agent_integrations]] and the session.integration capability;
+    // 22 adds send_keys_enter_delay_ms to that entry. The host parses this
+    // strictly, so a host that does not know 22 rejects the manifest rather
+    // than installing one whose send timing it would silently drop.
+    expect(manifest.root.api_version).toBe(22);
   });
 
   it("declares the freebuff integration the worker publishes status for", () => {
@@ -129,11 +130,18 @@ describe("aoe-plugin.toml", () => {
     expect(integrations[0].tool).toBe("freebuff");
     expect(integrations[0].command).toBe("freebuff");
     expect(integrations[0].provider_versions).toEqual([">=0.2.36, <1.0.0"]);
+    // The pause between typing a message and pressing Enter. Declared here so
+    // every install drives Freebuff the same way, with no user config.
+    expect(integrations[0].send_keys_enter_delay_ms).toBe(150);
     // Status only: claiming replies would need an in-process prompt hook.
     expect(integrations[0].replies).toBeUndefined();
   });
 
   it("pins the host line that parses this schema", () => {
+    // Deliberately not raised to the release that first knows api_version 22:
+    // guessing that number wrong either blocks a host that works or admits one
+    // that does not. The manifest version is the schema gate; the floor moves
+    // in the release that ships 22.
     expect(manifest.root.aoe_version).toBe(">=1.21.0, <2.0.0");
   });
 

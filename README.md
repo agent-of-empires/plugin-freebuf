@@ -35,19 +35,25 @@ rule, which a plugin-declared agent has none of (verified against aoe 1.21.0:
 the file is ignored and the row stays `Idle`). The flag is the attention signal
 that does work today.
 
-### Row status (api_version 19)
+### Row status (api_version 22)
 
 Agent of Empires' first-class route sets the row's own status: the shipped
-manifest declares `api_version = 19` with an `[[agent_integrations]]` entry and
-the `session.integration` capability, and the worker writes
+manifest declares `api_version = 22` with an `[[agent_integrations]]` entry, the
+`session.integration` capability, and `send_keys_enter_delay_ms = 150`, the pause
+the host leaves between typing a message and pressing `Enter` (Freebuff's
+composer reads a burst as a paste and drops an `Enter` inside that window). The
+worker writes
 `AgentIntegrationSnapshot` reports into the session's hook directory
 (`integration-agent-of-empires.aoe-freebuf.json`). The host reads those to override
 the row's status and to expose Freebuff in `aoe agents`, the agent picker, and
 `session.default_tool`.
 
 That schema version is also the install floor. The host parses manifests
-strictly and rejects one whose schema version it does not know, so
-`aoe_version` is `>=1.21.0, <2.0.0` -- the host line that parses this contract.
+strictly and rejects one whose schema version it does not know. `aoe_version`
+stays at `>=1.21.0, <2.0.0` because no released host parses API 22 yet: 22 exists
+only on the host's unreleased main (open host work on API 21 and 22). So this
+manifest cannot be released against a released host, and the `aoe_version` floor
+moves to the release that first parses 22, in the same change that ships it.
 `src/integration.ts` writes the report from the same pane classification as the
 attention flag, every tick; the attention flag still works on its own, so a
 session stays visible in the attention order either way.
@@ -83,7 +89,7 @@ plugin from the TUI, the web dashboard, or `aoe plugin {enable,disable,update}`.
 ## Layout
 
 ```
-aoe-plugin.toml        the manifest (api_version 19, integration, settings, ui, runtime)
+aoe-plugin.toml        the manifest (api_version 22, integration, settings, ui, runtime)
 package.json           build + dev tooling (tsc, eslint, vitest)
 tsconfig.json
 src/
