@@ -166,24 +166,20 @@ function isComposerFrame(lines: readonly string[], index: number): boolean {
 
 /**
  * The caption of the dialog drawn at the bottom of the pane, or null when the
- * bottom of the pane is the composer.
- *
- * The dialog replaces the composer, so a boxed panel with a composer drawn
- * below it is output the session printed or quoted, not a dialog waiting on the
- * user. Its height does not matter: the caption is read from the close row up.
+ * bottom of the pane is the composer: a boxed panel with a composer under it is
+ * output the session printed or quoted, not a dialog waiting on the user.
  */
 function bottomDialog(lines: readonly string[]): string | null {
   for (let close = lines.length - 1; close >= 0; close -= 1) {
     if (!DIALOG_CLOSE_ROW.test(lines[close])) continue;
-    // A body row can repeat the same words, so only a close row with a caption
-    // over it opens a dialog; anything else keeps the scan going upward.
+    // A body row can repeat those words, so only a caption over the row opens it.
     for (let top = close - 1; top >= Math.max(0, close - DIALOG_CAPTION_ROWS); top -= 1) {
       const found = DIALOG_TOP.exec(lines[top]);
       if (found === null) continue;
-      // Only rows under the dialog's own closing border can hold a composer;
-      // its body would otherwise read as one. A cut-off dialog has none.
+      // Only rows under the dialog's closing border can hold a composer, never
+      // its body. A dialog the pane cuts off has no border and so no composer.
       const bottom = lines.findIndex((row, index) => index > close && BOX_BOTTOM.test(row));
-      for (let below = bottom + 1; below < lines.length; below += 1) {
+      for (let below = bottom + 1; bottom !== -1 && below < lines.length; below += 1) {
         if (isComposerFrame(lines, below)) return null;
       }
       return found[1];

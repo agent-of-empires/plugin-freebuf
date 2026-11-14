@@ -122,6 +122,12 @@ describe("pane classification", () => {
     expect(classifyPane(`${body}\n╰──────────────────────────────╯`)).toBe("waiting");
   });
 
+  it("keeps a dialog the pane cuts off waiting over a transcript prompt", () => {
+    // The pane ends before the closing border, so nothing below it is a composer.
+    const cut = ["❯ hello", "╭─── Some questions for you ───╮", "│ Close ✕ │"];
+    expect(classifyPane(cut.join("\n"))).toBe("waiting");
+  });
+
   it("prefers a dialog over the working line it was drawn across", () => {
     expect(classifyPane(`${RUNNING_PANE}\n${WAITING_PANE}`)).toBe("waiting");
   });
