@@ -14,17 +14,16 @@ import { resolve } from "node:path";
 
 const root = process.cwd();
 const build = resolve(root, ".aoe-build");
-const suffix = process.platform === "win32" ? ".cmd" : "";
 
 mkdirSync(build, { recursive: true });
 for (const name of ["package.json", "package-lock.json"]) {
   copyFileSync(resolve(root, name), resolve(build, name));
 }
 
-execFileSync(`npm${suffix}`, ["install", "--prefix", build, "--no-audit", "--no-fund"], {
+execFileSync("npm", ["install", "--prefix", build, "--no-audit", "--no-fund"], {
   cwd: root,
   stdio: "inherit",
 });
 
-const tsc = resolve(build, "node_modules", ".bin", `tsc${suffix}`);
+const tsc = resolve(build, "node_modules", ".bin", "tsc");
 execFileSync(tsc, ["-p", resolve(root, "tsconfig.build.json")], { cwd: root, stdio: "inherit" });
