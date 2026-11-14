@@ -201,6 +201,52 @@ describe("pane classification", () => {
     expect(classifyPane(mentioning)).toBe("waiting");
   });
 
+  it("ignores a printed dialog above an unboxed prompt", () => {
+    // The prompt is not always drawn inside a box, and it still gives the
+    // dialog away as output: a dialog replaces whatever composer is there.
+    const printed = [
+      "  The panel reads:",
+      "╭──────────────── Some questions for you ────────────────╮",
+      "│                                                Close ✕ │",
+      "╰────────────────────────────────────────────────────────╯",
+      " ❯ Add to the current task",
+    ].join("\n");
+    expect(classifyPane(printed)).toBe("idle");
+  });
+
+  it("reads a boxed Do you want to proceed caption as waiting", () => {
+    const proceed = [
+      "╭────────────── Do you want to proceed? ──────────────╮",
+      "│                                          Close ✕ │",
+      "│  This runs the command above.                    │",
+      "╰──────────────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(proceed)).toBe("waiting");
+  });
+
+  it("leaves a dialog it does not recognise to the composer", () => {
+    // An unknown caption is not a verdict: only the dialogs known to block on
+    // the user decide, and the absence of a composer decides the rest.
+    const other = [
+      "╭────────────────── Preferences ──────────────────╮",
+      "│                                          Close ✕ │",
+      "│  Theme, model, shortcuts.                        │",
+      "╰──────────────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(other)).toBe("idle");
+  });
+
+  it("keeps a bare Close row in prose from blocking a session", () => {
+    // The close affordance on its own is not a dialog.
+    const prose = [
+      "│ Press Close ✕ in the top right of the panel to dismiss it. │",
+      "╭──────────────────────────────────────────╮",
+      "│  ▍Add to the current task                │",
+      "╰──────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(prose)).toBe("idle");
+  });
+
   it("prefers a dialog over the working line it was drawn across", () => {
     expect(classifyPane(`${RUNNING_PANE}\n${WAITING_PANE}`)).toBe("waiting");
   });
