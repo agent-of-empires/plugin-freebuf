@@ -62,17 +62,17 @@ const CAPTURE_TIMEOUT_MS = 4_000;
 
 export type PaneState = "waiting" | "running" | "idle";
 
-/**
- * Freebuff's blocking UI: the "Some questions for you" modal (with its Close
- * affordance) and the inline confirmation prompts. Checked before the working
- * line, because a dialog is drawn while the turn is still open.
- */
-const WAITING: RegExp[] = [
-  /Some questions for you/,
-  /^\s*Close ✕\s*$/m,
-  /Do you want to (?:proceed|allow|continue)/i,
-  /\(y\/n\)/i,
-];
+/** Rows a dialog's caption may sit above its close row. */
+const DIALOG_CAPTION_ROWS = 2;
+
+/** The captioned top border of a boxed dialog, `╭─── Some questions for you ───╮`. */
+const DIALOG_TOP = /^[ \t]*╭─+[ \t]+(.*?)[ \t]+─+╮[ \t]*$/;
+
+/** A row inside a boxed dialog carrying the modal's close affordance. */
+const DIALOG_CLOSE_ROW = /^[ \t]*│.*Close ✕.*│[ \t]*$/;
+
+/** Captions of the dialogs that block on the user. */
+const WAITING_DIALOG = /Some questions for you|Do you want to (?:proceed|allow|continue)/i;
 
 /** Freebuff's live turn status line. */
 const STATUS_LINE = /^[ \t]*(?:working|thinking)\.\.\.[^\n]*■[ \t]*Esc\b[ \t]*$/;
@@ -155,11 +155,53 @@ export function stripAnsi(text: string): string {
   return text.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
 }
 
+/** The border that closes a boxed panel, `╰────╯`. */
+const BOX_BOTTOM = /^[ \t]*╰─+╯[ \t]*$/;
+
+/** The composer a dialog would have replaced: prompt, input box, queued panel. */
+function isComposerFrame(lines: readonly string[], index: number): boolean {
+  const row = lines[index];
+  return PROMPT_LINE.test(row) || INPUT_BOX_TOP.test(row) || isQueuedPanel(lines, index);
+}
+
+/**
+ * The caption of the dialog drawn at the bottom of the pane, or null when the
+ * bottom of the pane is the composer: a boxed panel with a composer under it is
+ * output the session printed or quoted, not a dialog waiting on the user.
+ */
+function bottomDialog(lines: readonly string[]): string | null {
+  for (let close = lines.length - 1; close >= 0; close -= 1) {
+    if (!DIALOG_CLOSE_ROW.test(lines[close])) continue;
+    // A body row can repeat those words, so only a caption over the row opens it.
+    for (let top = close - 1; top >= Math.max(0, close - DIALOG_CAPTION_ROWS); top -= 1) {
+      const found = DIALOG_TOP.exec(lines[top]);
+      if (found === null) continue;
+      // Only rows under the dialog's closing border can hold a composer, never
+      // its body. A dialog the pane cuts off has no border and so no composer.
+      const bottom = lines.findIndex((row, index) => index > close && BOX_BOTTOM.test(row));
+      for (let below = bottom + 1; bottom !== -1 && below < lines.length; below += 1) {
+        if (isComposerFrame(lines, below)) return null;
+      }
+      return found[1];
+    }
+  }
+  return null;
+}
+
+/** What the dialog at the bottom of the pane is blocking on, or null if there is none. */
+function blockedOn(lines: readonly string[]): PaneState | null {
+  const caption = bottomDialog(lines);
+  if (caption === null) return null;
+  if (WAITING_DIALOG.test(caption)) return "waiting";
+  return null; // an unrecognised dialog is not a verdict; the composer decides
+}
+
 /** Classify a captured pane. Unrecognised content is the idle prompt. */
 export function classifyPane(text: string): PaneState {
-  const clean = stripAnsi(text);
-  if (WAITING.some((rule) => rule.test(clean))) return "waiting";
-  if (statusAbovePrompt(clean.split(/\r?\n/))) return "running";
+  const lines = stripAnsi(text).split(/\r?\n/);
+  const blocked = blockedOn(lines);
+  if (blocked !== null) return blocked;
+  if (statusAbovePrompt(lines)) return "running";
   return "idle";
 }
 

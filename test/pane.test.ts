@@ -99,6 +99,35 @@ describe("pane classification", () => {
     expect(classifyPane(IDLE_PANE)).toBe("idle");
   });
 
+  it("ignores a dialog-shaped panel the session printed above the composer", () => {
+    // A real dialog replaces the composer, so the box drawn as output is given
+    // away by the composer underneath it.
+    const printed = [
+      "  The panel reads:",
+      "╭──────────────── Some questions for you ────────────────╮",
+      "│                                                Close ✕ │",
+      "╰────────────────────────────────────────────────────────╯",
+      " working...  1m 31s   ■ Esc",
+      "╭────────────────────────────────────────────────────────╮",
+      "│  ▍Add to the current task (/ for commands)             │",
+      "╰────────────────────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(printed)).toBe("running");
+    expect(classifyPane(printed.replace(" working...  1m 31s   ■ Esc\n", ""))).toBe("idle");
+  });
+
+  it("reads a dialog whose body echoes the queued-message panel", () => {
+    // The phrase is dialog text, not the panel: it sits inside the box.
+    const body = "╭─── Some questions for you ───╮\n│ Close ✕ │\n│ Your message is saved │";
+    expect(classifyPane(`${body}\n╰──────────────────────────────╯`)).toBe("waiting");
+  });
+
+  it("keeps a dialog the pane cuts off waiting over a transcript prompt", () => {
+    // The pane ends before the closing border, so nothing below it is a composer.
+    const cut = ["❯ hello", "╭─── Some questions for you ───╮", "│ Close ✕ │"];
+    expect(classifyPane(cut.join("\n"))).toBe("waiting");
+  });
+
   it("prefers a dialog over the working line it was drawn across", () => {
     expect(classifyPane(`${RUNNING_PANE}\n${WAITING_PANE}`)).toBe("waiting");
   });
