@@ -111,8 +111,11 @@ Bridge timing (override via `createAdapter({ bridge })`):
 | `pollIntervalMs`   | `250`    | Delay between `capture-pane` polls               |
 | `quiescenceMs`     | `2000`   | Quiet window that ends the turn                  |
 | `echoTimeoutMs`    | `10000`  | How long to wait for the prompt echo             |
-| `maxTurnMs`        | `300000` | Hard cap for a whole turn                        |
+| `maxTurnMs`        | `300000` | Caps the poll loop after the echo lands          |
 | `startupTimeoutMs` | `90000`  | Wait for the TUI to settle, then type            |
+
+The readiness wait and the echo wait run before this cap starts, so a turn can
+take up to `startupTimeoutMs` plus `echoTimeoutMs` plus `maxTurnMs`.
 
 ## Resuming a conversation
 
