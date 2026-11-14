@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { PassThrough, Readable, Writable } from "node:stream";
 import { ndJsonStream } from "@agentclientprotocol/sdk";
 import { createAdapter, type AdapterOptions } from "../src/adapter.ts";
-import { FakeClock, FakePane, fakePaneFactory } from "./fake.ts";
+import { FakeClock, fakePaneFactory } from "./fake.ts";
 
 type Message = {
   jsonrpc?: string;
