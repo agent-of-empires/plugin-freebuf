@@ -55,6 +55,7 @@ describe("worker/host multiplexing", () => {
 
 describe("attention heartbeat", () => {
   const WAITING = "╭──── Some questions for you ────╮\n│                      Close ✕ │";
+  const ERROR = "╭──── Error ────╮\n│        Close ✕ │\n╰───────────────╯";
   const RUNNING = " working...      1m 33s   ■ Esc\n ❯ ▍Add to the current task";
   const IDLE = " ❯ ▍Add to the current task (/ for commands)\n ← for history · ? for help";
 
@@ -120,6 +121,18 @@ describe("attention heartbeat", () => {
     expect(report(hookBase, "sess-working")).toMatchObject({ status: "running" });
     expect(report(hookBase, "sess-idle")).toMatchObject({ status: "idle" });
     expect(report(hookBase, "sess-other")).toBeNull();
+  });
+
+  it("flags a session showing an error dialog, and reports its status", async () => {
+    const { hookBase, now } = await runTick([{ id: "sess-failed", tool: "freebuff" }], { "sess-failed": ERROR });
+
+    // An error dialog wants a dismissal, not an answer, so it is worth the user's
+    // attention just like a question is.
+    expect(flag(hookBase, "sess-failed")).toEqual({
+      urgent: true,
+      urgent_expires_at: Math.floor((now + FLAG_TTL_MS) / 1000),
+    });
+    expect(report(hookBase, "sess-failed")).toMatchObject({ schema_version: 1, status: "error" });
   });
 
   it("lowers a raised flag once the dialog is gone", async () => {
