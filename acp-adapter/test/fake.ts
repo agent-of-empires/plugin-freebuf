@@ -29,6 +29,29 @@ export function composerScreen(...rows: string[]): string {
   return [...rows, "", ...READY_SCREEN.split("\n").slice(2)].join("\n");
 }
 
+/**
+ * Models the TUI reacting to a submit, which is what tells `runTurn` the prompt
+ * left the composer: an unchanged screen after Enter reads as a lost submit, so
+ * the press is retried and then the turn fails. The caret is flipped rather than
+ * the draft cleared, so the transcript rows a test is watching stay as scripted.
+ * Call this after setting `pane.onSend`, since it wraps it.
+ */
+export function acceptsSubmit(pane: FakePane): void {
+  const inner = pane.onSend;
+  pane.onSend = (keys, options) => {
+    inner?.(keys, options);
+    if (options?.literal || keys !== "Enter") return;
+    // Toggling a character on the last row is enough of a change to read as a
+    // reaction. It is not whitespace, which the normalization drops, and it
+    // touches neither the picker caret nor the footer title, both of which the
+    // bridge parses.
+    const rows = pane.screen.split("\n");
+    const last = rows.length - 1;
+    rows[last] = rows[last].endsWith(".") ? rows[last].slice(0, -1) : `${rows[last]}.`;
+    pane.screen = rows.join("\n");
+  };
+}
+
 /** Deterministic clock: `sleep` advances virtual time instead of waiting. */
 export class FakeClock {
   time = 0;

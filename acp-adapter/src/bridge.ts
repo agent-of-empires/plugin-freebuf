@@ -12,7 +12,7 @@
 //      `quiescenceMs` and the status line no longer says the agent is working,
 //      or with `cancelled` when `session/cancel` interrupts it.
 
-import type { StopReason } from "@agentclientprotocol/sdk";
+import { RequestError, type StopReason } from "@agentclientprotocol/sdk";
 import {
   ScreenTracker,
   chatHistoryRows,
@@ -70,6 +70,15 @@ export const DEFAULT_BRIDGE_CONFIG: Omit<BridgeConfig, "now" | "sleep"> = {
  * that window are dropped, so a single sighting of the prompt is not enough.
  */
 export const READY_STABLE_CAPTURES = 3;
+
+/**
+ * Most presses of Enter one turn will make. A TUI can swallow the first one
+ * (its paste-burst window has not expired, or it is still settling), and
+ * nothing downstream notices: the prompt just sits in the composer and the
+ * turn never starts. Retrying is bounded so a pane holding a modal cannot be
+ * spammed with blank submits.
+ */
+export const MAX_SUBMIT_ATTEMPTS = 3;
 
 /** Real-time clock helpers used outside of tests. */
 export function systemClock(): Pick<BridgeConfig, "now" | "sleep"> {
@@ -183,10 +192,68 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
     // The prompt is already typed, so stopping here would leave a draft in the
     // composer, and the next turn's prompt would be typed onto it and submitted
     // together with it.
-    await clearTypedPrompt(pane, Array.from(promptText).length);
+    await clearDraft(pane, promptText, null);
+    return { stopReason: "cancelled", streamedChars };
+  }
+  // The composer with the prompt typed, which is the reference a retry compares
+  // against: the TUI reacts to a submit by taking the text out of the composer.
+  const typedScreen = await pane.capture();
+  const typedView = normalizeJoined(typedScreen);
+  if (events.isCancelled()) {
+    await clearDraft(pane, promptText, null);
     return { stopReason: "cancelled", streamedChars };
   }
   await pane.send(SUBMIT_KEY);
+
+  // A submit can still be lost, so press Enter again while the screen is
+  // unchanged: the TUI reacts the moment the prompt is really submitted.
+  let submitted = false;
+  let submitAttempts = 1;
+  const submitDeadline = config.now() + config.echoTimeoutMs;
+  // Space the presses across the whole budget instead of one per poll: at the
+  // poll interval three presses land in the first few hundred milliseconds, so
+  // a pane that accepts the first Enter late gets two more and a false "not
+  // submitted" while the turn it started is running.
+  const retryIntervalMs = Math.ceil(config.echoTimeoutMs / MAX_SUBMIT_ATTEMPTS);
+  let lastSubmitAt = config.now();
+  while (config.now() < submitDeadline) {
+    const remainingMs = submitDeadline - config.now();
+    await config.sleep(Math.min(config.pollIntervalMs, remainingMs));
+    if (events.isCancelled()) break;
+    const screen = await pane.capture();
+    if (normalizeJoined(screen) !== typedView) {
+      submitted = true; // the TUI reacted: the prompt left the composer
+      break;
+    }
+    // Out of attempts: keep watching until the deadline, in case a press lands
+    // late, rather than failing the turn before the budget is spent.
+    if (submitAttempts >= MAX_SUBMIT_ATTEMPTS) continue;
+    if (config.now() - lastSubmitAt < retryIntervalMs) continue;
+    // A press at the deadline would never be observed: the loop exits straight
+    // after it, so a pane that accepted it would still be reported as failed.
+    if (config.now() >= submitDeadline) continue;
+    submitAttempts += 1;
+    lastSubmitAt = config.now();
+    await pane.send(SUBMIT_KEY);
+  }
+
+  if (events.isCancelled()) {
+    await clearDraft(pane, promptText, typedView);
+    return { stopReason: "cancelled", streamedChars };
+  }
+  // A composer that still holds the typed prompt never accepted the submit.
+  // Continuing here would be the original bug in a quieter form: the echo check
+  // would match the prompt in the composer, the screen would then stay still,
+  // and the turn would report `end_turn` for work that never started.
+  if (!submitted) {
+    // Leaving the draft behind would corrupt the next turn: its prompt would be
+    // typed after it and one Enter would submit both.
+    await clearDraft(pane, promptText, typedView);
+    throw new RequestError(
+      -32000,
+      `the prompt was not submitted: the composer did not accept ${SUBMIT_KEY} after ${submitAttempts} attempts`,
+    );
+  }
 
   // Wait for the TUI to echo the prompt into the transcript so it is not
   // streamed back as assistant output. The search runs over the transcript, not
@@ -299,6 +366,7 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
 
   while (config.now() < deadline) {
     if (events.isCancelled()) {
+      await clearDraft(pane, promptText, typedView);
       return { stopReason: "cancelled", streamedChars };
     }
 
@@ -549,20 +617,36 @@ function collapse(text: string): string {
   return text.replace(/[\s⎘•·△▽✕]/gu, "");
 }
 
+/** A whole screen as one normalized string, for comparing two captures. */
+function normalizeJoined(raw: string): string {
+  return normalizeScreen(raw).join("\n");
+}
+
 /**
- * Delete the text this turn typed, so a stopped turn leaves no draft behind.
+ * Delete the text this turn typed, so a stopped or failed turn leaves no draft.
  *
- * The prompt is then known exactly (it is what this turn typed), so removing it
- * one character at a time needs no assumption about a clear-line binding the TUI
- * may not have. The count is in code points, not `String.length`: a prompt
- * holding an astral character such as an emoji would otherwise get two
- * backspaces for one character and delete text typed before this turn.
+ * One step for every exit, because each of them has to undo the same typing. The
+ * prompt is known exactly (it is what this turn typed), so removing it one
+ * character at a time needs no assumption about a clear-line binding the TUI may
+ * not have. The count is in code points, not `String.length`: a prompt holding an
+ * astral character such as an emoji would otherwise get two backspaces for one
+ * character and delete text typed before this turn. The repeat goes out as one
+ * tmux call, since one call per character costs a process spawn each.
  *
- * The whole repeat goes out as one tmux call: one call per character costs a
- * process spawn each, so a long pasted prompt would hold the cancel path for
- * tens of seconds while the adapter still reports a turn in flight.
+ * `typedView` is the composer with the prompt typed. Once the screen has moved
+ * on, the prompt is gone from the composer and the turn is writing output there,
+ * so clearing would delete the turn's own text. Pass `null` while Enter has not
+ * been pressed, when the draft is certainly still there.
  */
-async function clearTypedPrompt(pane: PaneSource, length: number): Promise<void> {
+async function clearDraft(
+  pane: PaneSource,
+  promptText: string,
+  typedView: string | null,
+): Promise<void> {
+  if (typedView !== null && normalizeJoined(await pane.capture()) !== typedView) {
+    return;
+  }
+  const length = Array.from(promptText).length;
   if (length === 0) return;
   await pane.send(CLEAR_KEY, { repeat: length });
 }

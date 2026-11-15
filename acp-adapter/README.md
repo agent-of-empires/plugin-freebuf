@@ -66,7 +66,10 @@ Scripts: `npm test` (node's built-in test runner), `npm run typecheck`.
    containing `Enter` is not interpreted as a keypress), waits out the TUI's
    paste window, then presses `Enter`. Sent in one burst the `Enter` is read as
    part of a paste and dropped, which leaves the prompt typed in the composer
-   with no turn running.
+   with no turn running. If the pane does not react, the press is retried, up to
+   three in total, spaced across the whole `echoTimeoutMs` so a slow pane is not
+   given up on early; a composer that never accepts it fails the turn instead of
+   reporting an `end_turn` that never ran.
 4. It waits for the user's message to reach the transcript and resets its diff
    baseline there, so the user's own text is never streamed as assistant output.
    (The *composer* echoes the text the moment it is typed; only the transcript

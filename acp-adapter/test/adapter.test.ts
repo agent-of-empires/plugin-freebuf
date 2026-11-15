@@ -8,7 +8,7 @@ import { PassThrough, Readable, Writable } from "node:stream";
 import { ndJsonStream } from "@agentclientprotocol/sdk";
 import { createAdapter, type AdapterOptions } from "../src/adapter.ts";
 import { memorySessionStore } from "../src/store.ts";
-import { composerScreen, FakeClock, FakePane, fakePaneFactory, READY_SCREEN } from "./fake.ts";
+import { acceptsSubmit, composerScreen, FakeClock, FakePane, fakePaneFactory, READY_SCREEN } from "./fake.ts";
 
 type Message = {
   jsonrpc?: string;
@@ -472,6 +472,7 @@ describe("session/load serialisation", () => {
             pane.screen = resumedScreen(expected, expected, "STORED");
           }
         };
+        acceptsSubmit(pane);
       },
     });
     await initialize(client);
@@ -530,6 +531,7 @@ describe("session/load serialisation", () => {
             pane.screen = resumedScreen(expected, expected, "STORED");
           }
         };
+        acceptsSubmit(pane);
       },
     });
     await initialize(client);
