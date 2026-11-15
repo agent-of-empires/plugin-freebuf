@@ -289,6 +289,15 @@ describe("delivery steps", () => {
     ]);
   });
 
+  it("steps straight to the next question when a multi-select question has no Custom row", () => {
+    const layout = dialog({ multi: true, isLast: false, custom: false });
+    // The row after the last option is the next question itself, so one Down
+    // from there moves on: pressing one more would walk into its first option.
+    expect(steps(answer({ selected_options: ["Keep the label"] }), layout)).toEqual([
+      keys("Up", "Down", "Left", "Down", "Down", "Enter", "Down"),
+    ]);
+  });
+
   it("types a custom answer into the dialog's text field", () => {
     expect(steps(answer({ selected_options: [], custom_input: "  Shrink it to a dot  " }))).toEqual([
       keys("Up", "Down", "Left", "Down", "Down", "Down", "Enter"), // reset, then option 0 → 1 → Custom

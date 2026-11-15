@@ -261,9 +261,11 @@ export function deliverySteps(
     if (dialog.multi) press("Tab"); // Submit, which a single choice already reached
     press("Enter"); // submits the form
   } else if (dialog.multi) {
-    // A multi-choice question never advances on its own: step past the Custom
-    // row, which is what moves the dialog on to the next question.
-    move(customRow);
+    // A multi-choice question never advances on its own: one Down from its last
+    // row (the Custom row when offered, otherwise the last option) moves the
+    // dialog on to the next question. Aiming past a Custom row that is not
+    // there would step into the next question's first option instead.
+    move(dialog.custom ? customRow : dialog.options.length - 1);
     press("Down");
   }
 
