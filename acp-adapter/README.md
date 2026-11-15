@@ -69,7 +69,10 @@ Scripts: `npm test` (node's built-in test runner), `npm run typecheck`.
    with no turn running. If the pane does not react, the press is retried, up to
    three in total, spaced across the whole `echoTimeoutMs` so a slow pane is not
    given up on early; a composer that never accepts it fails the turn instead of
-   reporting an `end_turn` that never ran.
+   reporting an `end_turn` that never ran. Acceptance is the draft leaving the
+   composer box, so a draft wrapped over rows and a footer repeating the
+   prompt's words are both read correctly, and one last capture before the
+   failure catches a press that lands after the last poll.
 4. It waits for the user's message to reach the transcript and resets its diff
    baseline there, so the user's own text is never streamed as assistant output.
    (The *composer* echoes the text the moment it is typed; only the transcript

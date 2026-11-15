@@ -72,6 +72,37 @@ export function draftScreen(draft: string, footer = "← for history · ? for he
   ].join("\n");
 }
 
+/**
+ * A settled screen whose composer holds `draft` wrapped over the box's rows the
+ * way the TUI wraps it: the first row carries the prompt glyph and the rows below
+ * continue the text, each framed by the box's own border column. A real prompt
+ * longer than one row is exactly what the whole-screen comparison could not see
+ * past, so a test that wants a long draft has to draw it like this.
+ */
+export function wrappedDraftScreen(draft: string, footer = "← for history · ? for help"): string {
+  const inner = READY_SCREEN.split("\n")[2].length - 2;
+  const rows: string[] = [];
+  let rest = draft;
+  let prefix = "  ▍";
+  do {
+    const width = inner - prefix.length;
+    rows.push(`│${`${prefix}${rest.slice(0, width)}`.padEnd(inner)}│`);
+    rest = rest.slice(width);
+    prefix = "  ";
+  } while (rest !== "");
+  return [
+    "  freebuff",
+    "",
+    "╭──────────────────────────────╮",
+    "│                              │",
+    ...rows,
+    "│                              │",
+    "╰──────────────────────────────╯",
+    " DeepSeek V4.1 Flash Slow · /tmp · Chat: chat",
+    ` ${footer}`,
+  ].join("\n");
+}
+
 /** Deterministic clock: `sleep` advances virtual time instead of waiting. */
 export class FakeClock {
   time = 0;

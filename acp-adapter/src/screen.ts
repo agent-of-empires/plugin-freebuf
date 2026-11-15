@@ -322,11 +322,12 @@ function isDecorationRow(line: string): boolean {
  * status rows, blank padding rows, and whole bordered boxes (the ad box). Stops
  * at the first row that is real content: the transcript itself.
  */
-function chromeStart(lines: readonly string[]): number {
-  // Only a box holding the prompt glyph is the composer. A box in the
-  // transcript (a code block, a table, an answer) is content, and cutting the
-  // transcript at its top border would drop everything above it.
-  let box = -1;
+/**
+ * The composer box's top and bottom border rows, or null when the screen has no
+ * composer. Only a box holding the prompt glyph is the composer: a box in the
+ * transcript (a code block, a table, an answer) is content.
+ */
+function composerBox(lines: readonly string[]): { top: number; bottom: number } | null {
   for (let i = lines.length - 1; i >= 0; i--) {
     if (!BOX_TOP.test(lines[i])) continue;
     let bottom = -1;
@@ -337,12 +338,17 @@ function chromeStart(lines: readonly string[]): number {
       }
     }
     const inside = lines.slice(i, bottom > 0 ? bottom + 1 : lines.length);
-    if (inside.some((line) => PROMPT_ROW.test(line))) {
-      box = i;
-      break;
-    }
+    if (inside.some((line) => PROMPT_ROW.test(line))) return { top: i, bottom };
   }
-  if (box < 0) return lines.length;
+  return null;
+}
+
+function chromeStart(lines: readonly string[]): number {
+  // Cutting the transcript at a transcript box's top border would drop
+  // everything above it, so the block starts at the composer's box only.
+  const composer = composerBox(lines);
+  if (composer === null) return lines.length;
+  const box = composer.top;
 
   let start = box;
   const limit = Math.max(0, box - MAX_CHROME_ROWS);
@@ -417,14 +423,37 @@ function dropChromeBoxes(lines: readonly string[]): string[] {
   return kept;
 }
 
+/** The TUI's placeholder for an empty composer: chrome, not a draft. */
+const COMPOSER_PLACEHOLDER = /^[ \t]*(?:▍|❯)?[ \t]*Enter a coding task[ \t]*$/u;
+
 /**
- * The bottom chrome block, which holds the composer and the footer. A prompt
- * that has not been submitted is still drawn here, so this is where acceptance
- * of a submit can be told apart from any other repaint.
+ * The text the composer draws, and nothing else: the rows inside its box with the
+ * box's own borders removed, the footer and body rows below it excluded, and the
+ * empty-composer placeholder dropped. A prompt that has not been submitted is
+ * drawn here, so this is where acceptance of a submit is told apart from any
+ * other repaint.
+ *
+ * Everything that is not the draft has to go. The border column between wrapped
+ * rows sits inside the text, so a needle spanning two rows would never match and
+ * a long draft would read as already submitted. The footer repeats ordinary
+ * words ("? for help"), so a prompt made of one of them would read as still in
+ * the composer after the TUI took it, and the bridge would retry a submit that
+ * was accepted and then fail the turn it started. The placeholder is drawn
+ * exactly when the composer is empty, so a prompt whose text it repeats would
+ * never look submitted either.
  */
 export function composerText(raw: string): string {
   const lines = normalizeScreen(raw);
-  return lines.slice(chromeStart(lines)).join("\n");
+  const box = composerBox(lines);
+  // No composer at all: the TUI switched to a writing view, and no draft is left
+  // behind on a screen that cannot hold one.
+  if (box === null) return "";
+  const bottom = box.bottom > 0 ? box.bottom : lines.length;
+  return lines
+    .slice(box.top + 1, bottom)
+    .map((row) => row.replace(/^[ \t]*│/u, "").replace(/│[ \t]*$/u, ""))
+    .filter((row) => !COMPOSER_PLACEHOLDER.test(row))
+    .join("\n");
 }
 
 /**

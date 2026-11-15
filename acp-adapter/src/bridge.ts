@@ -253,6 +253,16 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
   // Continuing here would be the original bug in a quieter form: the echo check
   // would match the prompt in the composer, the screen would then stay still,
   // and the turn would report `end_turn` for work that never started.
+  // An Enter pressed just before the last poll can still land after it, so one
+  // more capture decides the turn, on the same terms the loop accepts a submit:
+  // failing it here would report a turn as failed while it runs, and a capture
+  // that shows no reaction at all must not pass for one.
+  if (!submitted) {
+    const finalScreen = await pane.capture();
+    if (normalizeJoined(finalScreen) !== typedView && leftComposer(finalScreen, typedNeedle)) {
+      submitted = true;
+    }
+  }
   if (!submitted) {
     // Leaving the draft behind would corrupt the next turn: its prompt would be
     // typed after it and one Enter would submit both.

@@ -8,7 +8,15 @@ import {
   type BridgeConfig,
   type TurnNotice,
 } from "../src/bridge.ts";
-import { acceptsSubmit, composerScreen, draftScreen, FakeClock, FakePane, READY_SCREEN } from "./fake.ts";
+import {
+  acceptsSubmit,
+  composerScreen,
+  draftScreen,
+  FakeClock,
+  FakePane,
+  READY_SCREEN,
+  wrappedDraftScreen,
+} from "./fake.ts";
 
 const meta = { sessionId: "s1", cwd: "/tmp/project" };
 
@@ -287,6 +295,104 @@ describe("runTurn", () => {
     const clears = pane.sent.filter((entry) => entry.keys === "BSpace");
     assert.equal(clears.length, 1, "a repainting footer must not skip the clear");
     assert.equal(clears[0].options?.repeat, Array.from(promptText).length);
+  });
+
+  it("retries a swallowed submit for a prompt that wraps in the composer", async () => {
+    // The composer text used to be the whole bottom chrome block, border columns
+    // and footer included, so a needle spanning two rows could never match: a
+    // draft too long for one row read as already submitted, the retry it needed
+    // never fired, and the turn it never started was reported as `end_turn`.
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, composerScreen("boot"));
+    const sink = collect();
+    const promptText = "summarise the failing test and name the fix";
+    pane.onSend = (keys, options) => {
+      if (!options?.literal && keys === "Enter") return; // every press is swallowed
+      pane.screen = wrappedDraftScreen(keys);
+    };
+
+    await assert.rejects(
+      runTurn({ pane, promptText, config: testConfig(clock), events: sink.events }),
+      /was not submitted/,
+    );
+    assert.equal(
+      pane.sent.filter((entry) => entry.keys === "Enter").length,
+      MAX_SUBMIT_ATTEMPTS,
+      "a wrapped draft must be retried like any other",
+    );
+    const clears = pane.sent.filter((entry) => entry.keys === "BSpace");
+    assert.equal(clears.length, 1, "a wrapped draft must still be cleared");
+    assert.equal(clears[0].options?.repeat, Array.from(promptText).length);
+  });
+
+  it("accepts a submit when the footer repeats the prompt's text", async () => {
+    // The footer below the composer says "? for help", so a prompt of "help" used
+    // to be found there after the TUI took it: the submit was retried, the draft
+    // was cleared twice over, and a turn that was running was failed.
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, composerScreen("boot"));
+    const sink = collect();
+    let enters = 0;
+    pane.onSend = (keys, options) => {
+      if (options?.literal) {
+        pane.screen = draftScreen(keys); // the footer below it repeats the prompt
+        return;
+      }
+      if (keys !== "Enter") return;
+      enters += 1;
+      pane.screen = composerScreen("help", "thinking... ■ Esc");
+    };
+
+    const result = await runTurn({ pane, promptText: "help", config: testConfig(clock), events: sink.events });
+
+    assert.equal(result.stopReason, "end_turn");
+    assert.equal(enters, 1, "an accepted submit must not be pressed again");
+    assert.deepEqual(
+      pane.sent.filter((entry) => entry.keys === "BSpace"),
+      [],
+      "an accepted submit must not be cleared",
+    );
+  });
+
+  it("does not fail a turn whose Enter lands after the last poll", async () => {
+    // Presses are spaced across the budget, so the last one can land just before
+    // the deadline and be accepted just after it. The loop exits on the deadline
+    // with the draft still drawn, and failing the turn there reports a failure for
+    // work that has started.
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, composerScreen("boot"));
+    const sink = collect();
+    const config = testConfig(clock);
+    let firstPress = -1;
+    let latePolls = 0;
+    pane.onSend = (keys, options) => {
+      if (options?.literal) {
+        pane.screen = draftScreen(keys);
+        return;
+      }
+      if (keys !== "Enter") return;
+      if (firstPress < 0) firstPress = clock.time;
+    };
+    // The submit budget runs from the first press, and the loop's last poll lands
+    // on its end, where the draft is still drawn. The TUI finishes the press only
+    // after that, so the first capture that can see it is the one taken after the
+    // loop: the deadline-based failure never took it and reported a running turn
+    // as a failed one.
+    pane.onCapture = () => {
+      if (firstPress < 0) return;
+      if (clock.time < firstPress + config.echoTimeoutMs) return;
+      latePolls += 1;
+      if (latePolls === 2) pane.screen = composerScreen("go", "thinking... ■ Esc");
+    };
+
+    const result = await runTurn({ pane, promptText: "go", config, events: sink.events });
+
+    assert.equal(result.stopReason, "end_turn");
+    assert.deepEqual(
+      pane.sent.filter((entry) => entry.keys === "BSpace"),
+      [],
+      "a turn that started late must not be cleared or failed",
+    );
   });
 
   it("clears the draft when cancelled while the submit is unconfirmed", async () => {
