@@ -60,8 +60,32 @@ export async function resolveTmuxSession(sessionId: string, binary: string = tmu
   return matches.length === 1 ? matches[0] : null;
 }
 
-/** True when the steps were accepted by the pane. */
-export type KeySender = (sessionId: string, steps: readonly KeyStep[]) => Promise<boolean>;
+/**
+ * How much of a sequence reached the pane. `none` is safe to retry; `partial`
+ * is not, because replaying the sequence from the start would press the keys
+ * that already landed a second time (toggling an option back, typing the answer
+ * twice), so the caller has to give up on that reply instead.
+ */
+export type DeliveryOutcome = "sent" | "partial" | "none";
+
+export interface DeliveryOptions {
+  /** The tmux binary; overridden for tests. */
+  binary?: string;
+  /**
+   * Asked after the pane has been resolved and immediately before the first
+   * key. Resolving the target is asynchronous, so the dialog the sequence was
+   * built for can be gone by then, and an answer must never be pressed into a
+   * different question.
+   */
+  confirm?: () => Promise<boolean>;
+}
+
+/** How a sequence is sent into a session's pane. */
+export type KeySender = (
+  sessionId: string,
+  steps: readonly KeyStep[],
+  options?: DeliveryOptions,
+) => Promise<DeliveryOutcome>;
 
 /** A typed answer travels as one literal word; control characters are refused. */
 function sendableText(text: string): boolean {
@@ -72,25 +96,31 @@ function sendableText(text: string): boolean {
 export async function sendKeysToPane(
   sessionId: string,
   steps: readonly KeyStep[],
-  binary: string = tmuxBinary(),
-): Promise<boolean> {
-  if (steps.length === 0) return false;
+  options: DeliveryOptions = {},
+): Promise<DeliveryOutcome> {
+  const binary = options.binary ?? tmuxBinary();
+  if (steps.length === 0) return "none";
   for (const step of steps) {
     const valid = "text" in step ? sendableText(step.text) : step.keys.length > 0 && step.keys.every((key) => ALLOWED_KEYS.has(key));
-    if (!valid) return false;
+    if (!valid) return "none";
   }
   const target = await resolveTmuxSession(sessionId, binary);
-  if (target === null) return false;
-  try {
-    for (const step of steps) {
-      const args =
-        "text" in step
-          ? ["send-keys", "-t", target, "-l", "--", step.text]
-          : ["send-keys", "-t", target, ...step.keys];
+  if (target === null) return "none";
+  // The dialog may have moved on while the target was being resolved.
+  const confirm = options.confirm;
+  if (confirm !== undefined && !(await confirm().catch(() => false))) return "none";
+  let applied = 0;
+  for (const step of steps) {
+    const args =
+      "text" in step
+        ? ["send-keys", "-t", target, "-l", "--", step.text]
+        : ["send-keys", "-t", target, ...step.keys];
+    try {
       await run(binary, args, { timeout: TMUX_TIMEOUT_MS, windowsHide: true });
+    } catch {
+      return applied === 0 ? "none" : "partial";
     }
-    return true;
-  } catch {
-    return false;
+    applied += 1;
   }
+  return "sent";
 }

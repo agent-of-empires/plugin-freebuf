@@ -20,7 +20,7 @@ afterEach(() => {
  * A stand-in for tmux: it answers `list-sessions` with the names on the
  * TMUX_SESSIONS line of its own source, and records every other call.
  */
-function fakeTmux(sessions: string[]): { binary: string; log: string } {
+function fakeTmux(sessions: string[], failWhen?: string): { binary: string; log: string } {
   const dir = tempDir("fake-tmux-");
   const binary = path.join(dir, "tmux");
   const log = path.join(dir, "calls.log");
@@ -33,6 +33,9 @@ function fakeTmux(sessions: string[]): { binary: string; log: string } {
       ...sessions.map((name) => `  echo '${name}'`),
       "  exit 0",
       "fi",
+      ...(failWhen === undefined
+        ? []
+        : [`case "$*" in *'${failWhen}'*) printf 'refused\\n' >&2; exit 1;; esac`]),
       "exit 0",
       "",
     ].join("\n"),
@@ -85,8 +88,8 @@ describe("key delivery", () => {
     process.env.AOE_TMUX_LOG = fake.log;
     try {
       await expect(
-        sendKeysToPane("41ecee7b5eb94d20", [{ keys: ["Down", "Enter"] }], fake.binary),
-      ).resolves.toBe(true);
+        sendKeysToPane("41ecee7b5eb94d20", [{ keys: ["Down", "Enter"] }], { binary: fake.binary }),
+      ).resolves.toBe("sent");
       const calls = readFileSync(fake.log, "utf8").trim().split("\n");
       expect(calls).toEqual(["list-sessions -F #{session_name}", "send-keys -t aoe_omp_41ecee7b Down Enter"]);
     } finally {
@@ -99,8 +102,8 @@ describe("key delivery", () => {
     process.env.AOE_TMUX_LOG = fake.log;
     try {
       await expect(
-        sendKeysToPane("41ecee7b5eb94d20", [{ keys: ["Enter"] }, { text: "press -l -- Enter" }], fake.binary),
-      ).resolves.toBe(true);
+        sendKeysToPane("41ecee7b5eb94d20", [{ keys: ["Enter"] }, { text: "press -l -- Enter" }], { binary: fake.binary }),
+      ).resolves.toBe("sent");
       const calls = readFileSync(fake.log, "utf8").trim().split("\n");
       expect(calls.slice(1)).toEqual([
         "send-keys -t aoe_omp_41ecee7b Enter",
@@ -115,10 +118,10 @@ describe("key delivery", () => {
     const fake = fakeTmux(["aoe_omp_41ecee7b"]);
     process.env.AOE_TMUX_LOG = fake.log;
     try {
-      await expect(sendKeysToPane("41ecee7b5eb94d20", [{ keys: ["C-c"] }], fake.binary)).resolves.toBe(false);
-      await expect(sendKeysToPane("41ecee7b5eb94d20", [{ text: "" }], fake.binary)).resolves.toBe(false);
-      await expect(sendKeysToPane("41ecee7b5eb94d20", [{ keys: [] }], fake.binary)).resolves.toBe(false);
-      await expect(sendKeysToPane("41ecee7b5eb94d20", [], fake.binary)).resolves.toBe(false);
+      await expect(sendKeysToPane("41ecee7b5eb94d20", [{ keys: ["C-c"] }], { binary: fake.binary })).resolves.toBe("none");
+      await expect(sendKeysToPane("41ecee7b5eb94d20", [{ text: "" }], { binary: fake.binary })).resolves.toBe("none");
+      await expect(sendKeysToPane("41ecee7b5eb94d20", [{ keys: [] }], { binary: fake.binary })).resolves.toBe("none");
+      await expect(sendKeysToPane("41ecee7b5eb94d20", [], { binary: fake.binary })).resolves.toBe("none");
       // Rejected before any tmux call, so the fake never ran and wrote its log.
       expect(existsSync(fake.log)).toBe(false);
     } finally {
@@ -130,7 +133,47 @@ describe("key delivery", () => {
     const fake = fakeTmux([]);
     process.env.AOE_TMUX_LOG = fake.log;
     try {
-      await expect(sendKeysToPane("41ecee7b5eb94d20", [{ keys: ["Enter"] }], fake.binary)).resolves.toBe(false);
+      await expect(sendKeysToPane("41ecee7b5eb94d20", [{ keys: ["Enter"] }], { binary: fake.binary })).resolves.toBe("none");
+    } finally {
+      delete process.env.AOE_TMUX_LOG;
+    }
+  });
+
+  it("tells a partial delivery apart from one that never started", async () => {
+    // The first call lands, the second is refused: replaying the sequence would
+    // press the first step's keys twice, so the caller must not retry.
+    const fake = fakeTmux(["aoe_omp_41ecee7b"], "literal answer");
+    process.env.AOE_TMUX_LOG = fake.log;
+    try {
+      await expect(
+        sendKeysToPane(
+          "41ecee7b5eb94d20",
+          [{ keys: ["Enter"] }, { text: "literal answer" }, { keys: ["Enter"] }],
+          { binary: fake.binary },
+        ),
+      ).resolves.toBe("partial");
+      const calls = readFileSync(fake.log, "utf8").trim().split("\n");
+      expect(calls.slice(1)).toEqual([
+        "send-keys -t aoe_omp_41ecee7b Enter",
+        "send-keys -t aoe_omp_41ecee7b -l -- literal answer",
+      ]);
+    } finally {
+      delete process.env.AOE_TMUX_LOG;
+    }
+  });
+
+  it("drops the sequence when the dialog moved on while the pane was resolved", async () => {
+    const fake = fakeTmux(["aoe_omp_41ecee7b"]);
+    process.env.AOE_TMUX_LOG = fake.log;
+    try {
+      await expect(
+        sendKeysToPane("41ecee7b5eb94d20", [{ keys: ["Enter"] }], { binary: fake.binary, confirm: async () => false }),
+      ).resolves.toBe("none");
+      // Only the target lookup ran: not one key reached the pane.
+      expect(readFileSync(fake.log, "utf8").trim()).toBe("list-sessions -F #{session_name}");
+      await expect(
+        sendKeysToPane("41ecee7b5eb94d20", [{ keys: ["Enter"] }], { binary: fake.binary, confirm: async () => true }),
+      ).resolves.toBe("sent");
     } finally {
       delete process.env.AOE_TMUX_LOG;
     }

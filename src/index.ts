@@ -24,7 +24,7 @@ import { buildSnapshot, writeReport, type AgentIntegrationSnapshot, type Integra
 import { capturePane, classifyPane } from "./pane.js";
 import { consumeReply, deliverySteps, readReply } from "./replies.js";
 import { MethodNotFoundError, RpcResponse, errorResponse, resultResponse } from "./rpc.js";
-import { sendKeysToPane, type KeySender } from "./tmux.js";
+import { sendKeysToPane, type DeliveryOutcome, type KeySender } from "./tmux.js";
 
 const RUNTIME = "node";
 
@@ -215,6 +215,7 @@ async function answerReply(
   sessionId: string,
   snapshot: AgentIntegrationSnapshot,
   dialog: PaneDialog,
+  capture: (sessionId: string) => Promise<string | null>,
   send: KeySender,
   euid: number,
 ): Promise<void> {
@@ -225,15 +226,23 @@ async function answerReply(
     note(`reply for ${sessionId} asks for something this dialog does not offer; leaving it alone`);
     return;
   }
-  let delivered = false;
+  // Resolving the pane is asynchronous and the user may have answered this
+  // question in the Freebuff window meanwhile, so the dialog is read again right
+  // before the first key rather than trusting the capture this tick started
+  // with. A dialog that has moved on gets nothing.
+  const stillOpen = async (): Promise<boolean> => {
+    const pane = await capture(sessionId);
+    return pane !== null && parsePaneDialog(pane)?.id === dialog.id;
+  };
+  let outcome: DeliveryOutcome;
   try {
-    delivered = await send(sessionId, steps);
+    outcome = await send(sessionId, steps, { confirm: stillOpen });
   } catch (err) {
     note(`reply send failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
     return;
   }
-  if (!delivered) {
-    // The pane may be gone this tick; the next one retries the same file.
+  if (outcome === "none") {
+    // Nothing reached the pane, so the next tick can try the same file again.
     note(`reply for ${sessionId} could not be delivered`);
     return;
   }
@@ -241,6 +250,12 @@ async function answerReply(
     consumeReply(dir);
   } catch (err) {
     note(`reply cleanup failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (outcome === "partial") {
+    // Part of the sequence is already in the pane, so replaying it would press
+    // those keys twice; the dialog is left for the user instead.
+    note(`reply for ${sessionId} was only partly delivered; not retrying, answer it in the Freebuff window`);
+    return;
   }
   const answer = reply.response.answers[0];
   const chosen = [...(answer?.selected_options ?? []), answer?.custom_input?.trim() ?? ""]
@@ -329,7 +344,7 @@ export async function heartbeat(options: HeartbeatOptions = {}): Promise<void> {
           note(`flag write failed for ${id}: ${err instanceof Error ? err.message : String(err)}`);
           return;
         }
-        if (prompt !== null && dialog !== null) await answerReply(dir, id, snapshot, dialog, send, euid);
+        if (prompt !== null && dialog !== null) await answerReply(dir, id, snapshot, dialog, capture, send, euid);
       }),
     );
   }

@@ -130,6 +130,13 @@ describe("reply sidecar", () => {
     const single = snapshot();
     writeReplyFile(dir, answer({ selected_options: ["Keep the label"], custom_input: "dot" }));
     expect(readReply(dir, single, os.userInfo().uid)).toBeNull();
+    // Nor two options and typed text: delivery can only take one of the two, so
+    // the other would be dropped without a word.
+    writeReplyFile(
+      dir,
+      answer({ selected_options: ["Keep the label", "Icon only, drop sort/filter"], custom_input: "dot" }),
+    );
+    expect(readReply(dir, single, os.userInfo().uid)).toBeNull();
     writeReplyFile(dir, answer({ selected_options: [], custom_input: " dot " }));
     expect(readReply(dir, single, os.userInfo().uid)).not.toBeNull();
   });
@@ -242,6 +249,21 @@ describe("delivery steps", () => {
     expect(
       steps(answer({ selected_options: ["Icon only, drop sort/filter", "Keep the label"] }), layout),
     ).toEqual([keys("Up", "Down", "Left", "Down", "Enter", "Down", "Enter", "Tab", "Enter")]);
+  });
+
+  it("turns off a checked multi-select option the answer does not include", () => {
+    const layout = dialog({
+      multi: true,
+      options: [
+        { label: "Icon only, drop sort/filter", marker: "☑" },
+        { label: "Keep the label", marker: "☐" },
+      ],
+    });
+    // Only the second option is answered, so the checked first one has to be
+    // toggled off or the form would submit it as well.
+    expect(steps(answer({ selected_options: ["Keep the label"] }), layout)).toEqual([
+      keys("Up", "Down", "Left", "Down", "Enter", "Down", "Enter", "Tab", "Enter"),
+    ]);
   });
 
   it("leaves an already-checked multi-select option alone instead of toggling it off", () => {

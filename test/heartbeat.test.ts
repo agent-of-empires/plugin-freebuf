@@ -3,7 +3,7 @@ import * as os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { FLAG_TTL_MS, heartbeat, processLine, sendRequest, setOutbound } from "../src/index";
-import { REPLY_FILENAME } from "../src/replies";
+import { REPLY_FILENAME, type KeyStep } from "../src/replies";
 
 const cleanups: string[] = [];
 
@@ -189,7 +189,7 @@ describe("attention heartbeat", () => {
     const tick = async (pane: string): Promise<void> => {
       const sent: string[] = [];
       setOutbound((line) => sent.push(line));
-      const run = heartbeat({ hookBase, now: 1_700_000_000_000, capture: async () => pane, send: async () => true });
+      const run = heartbeat({ hookBase, now: 1_700_000_000_000, capture: async () => pane, send: async () => "sent" });
       const request = JSON.parse(sent[0]) as { id: number };
       processLine(
         JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { sessions: [{ id: "sess-rev", tool: "freebuff" }] } }),
@@ -213,7 +213,7 @@ describe("attention heartbeat", () => {
     const hookBase = tempDir("aoe-hooks-");
     const dir = path.join(hookBase, "sess-answer");
     const sent: string[] = [];
-    const delivered: Array<{ id: string; keys: string[] }> = [];
+    const delivered: Array<{ id: string; steps: readonly KeyStep[] }> = [];
     setOutbound((line) => sent.push(line));
     const now = 1_700_000_000_000;
     const tick = heartbeat({
@@ -222,7 +222,7 @@ describe("attention heartbeat", () => {
       capture: async () => DIALOG,
       send: async (id, steps) => {
         delivered.push({ id, steps });
-        return true;
+        return "sent";
       },
     });
     const request = JSON.parse(sent[0]) as { id: number };
@@ -261,7 +261,7 @@ describe("attention heartbeat", () => {
       capture: async () => DIALOG,
       send: async (id, steps) => {
         delivered.push({ id, steps });
-        return true;
+        return "sent";
       },
     });
     const secondRequest = JSON.parse(sent[sent.length - 1]) as { id: number };
@@ -306,7 +306,7 @@ describe("attention heartbeat", () => {
         capture: async () => multi,
         send: async (id, steps) => {
           delivered.push({ id, steps });
-          return true;
+          return "sent";
         },
       });
       const request = JSON.parse(sent[sent.length - 1]) as { id: number };
@@ -355,16 +355,16 @@ describe("attention heartbeat", () => {
     writeFileSync(replyFile, JSON.stringify({ schema_version: 1, instance_id: "other" }), { mode: 0o600 });
     chmodSync(replyFile, 0o600);
 
-    const delivered: string[][] = [];
+    const delivered: Array<readonly KeyStep[]> = [];
     const sent: string[] = [];
     setOutbound((line) => sent.push(line));
     const tick = heartbeat({
       hookBase,
       now: 1_700_000_000_000,
       capture: async () => DIALOG,
-      send: async (_id, keys) => {
-        delivered.push(keys);
-        return true;
+      send: async (_id, steps) => {
+        delivered.push(steps);
+        return "sent";
       },
     });
     const request = JSON.parse(sent[0]) as { id: number };
@@ -381,7 +381,7 @@ describe("attention heartbeat", () => {
     const hookBase = tempDir("aoe-hooks-");
     const dir = path.join(hookBase, "sess-gone");
     const sent: string[] = [];
-    const runTickWith = async (deliver: boolean): Promise<void> => {
+    const runTickWith = async (deliver: "sent" | "none"): Promise<void> => {
       setOutbound((line) => sent.push(line));
       const tick = heartbeat({
         hookBase,
@@ -395,7 +395,7 @@ describe("attention heartbeat", () => {
       );
       await tick;
     };
-    await runTickWith(true);
+    await runTickWith("sent");
 
     const published = report(hookBase, "sess-gone") as Record<string, unknown>;
     const prompt = published.prompt as { id: string; questions: Array<{ id: string }> };
@@ -417,10 +417,10 @@ describe("attention heartbeat", () => {
     chmodSync(replyFile, 0o600);
 
     // The pane vanished between capture and send: the answer is not consumed.
-    await runTickWith(false);
+    await runTickWith("none");
     expect(existsSync(replyFile)).toBe(true);
 
-    await runTickWith(true);
+    await runTickWith("sent");
     expect(existsSync(replyFile)).toBe(false);
   });
 

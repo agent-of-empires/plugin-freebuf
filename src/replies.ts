@@ -114,9 +114,12 @@ function answerMatches(value: unknown, question: IntegrationPromptQuestion): boo
   // A typed answer is a single line of text: it is typed into the dialog, so
   // control characters are refused rather than sent.
   if (hasControlCharacters(typed)) return false;
+  // Multi choice takes any mix: options checked and a typed answer are not
+  // alternatives there, and the dialog submits whichever the user wanted.
   if (question.multi === true) return selected.length + typed.length > 0;
-  // Single choice: exactly one option, or a typed answer, never both.
-  return (selected.length === 1) !== (typed !== "");
+  // Single choice: exactly one option, or a typed answer, never both --
+  // delivery can only take one of the two, so the other would be dropped.
+  return selected.length === 0 ? typed !== "" : selected.length === 1 && typed === "";
 }
 
 /**
@@ -181,8 +184,11 @@ export function consumeReply(dir: string): void {
  * collapsing a question does not clear them -- so the reset changes nothing
  * except the focus.
  *
- * Multi-choice Enter toggles rather than selects, so a choice the pane already
- * shows as checked is skipped instead of being toggled back off.
+ * Multi-choice Enter toggles rather than selects, so the sequence presses it
+ * only on options whose checked state differs from the answer: one the pane
+ * already shows as checked and the answer keeps is left alone, and one that is
+ * checked but not answered is turned off, so the form submits exactly the
+ * answer rather than whatever it happened to have marked.
  */
 export function deliverySteps(
   reply: Reply,
@@ -225,11 +231,14 @@ export function deliverySteps(
   const select = (): void => press("Enter");
 
   if (dialog.multi) {
-    // Toggling leaves the focus where it is, so every choice needs its own trip.
-    for (const index of [...indices].sort((left, right) => left - right)) {
+    // Toggling leaves the focus where it is, so every option that has to change
+    // needs its own trip -- and one already in the answered state must not be
+    // pressed at all.
+    for (let index = 0; index < dialog.options.length; index += 1) {
+      const wanted = indices.includes(index);
+      if (wanted === (dialog.options[index]?.marker === CHECKED_MARKER)) continue;
       move(index);
-      // Enter toggles, so a choice already on would be turned off by pressing it.
-      if (dialog.options[index]?.marker !== CHECKED_MARKER) select();
+      select();
     }
     if (typed !== "") {
       move(customRow);
