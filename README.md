@@ -71,8 +71,8 @@ replayed rather than guessed:
 
 | Question | Sent |
 |---|---|
-| every reply | `Up`, `Down`, `Left`, `Down` first: `Up` leaves Submit (where the form sits between being answered and being submitted) or steps the focus up a row, `Down` undoes a step back to the previous question, and `Left`/`Down` collapse and re-expand the open question, which puts the focus back on its first option — so the counts below hold wherever the focus was |
-| single choice | `Down` × option index, then `Enter` — Freebuff selects and advances |
+| every reply | `Up`, `Down`, `Left`, `Down` first: `Up` leaves Submit (where the form sits between being answered and being submitted) or steps the focus up a row, `Down` undoes a step back to the previous question, and `Left`/`Down` collapse and re-expand the open question, which puts the focus back on its first option, so the counts below hold wherever the focus was |
+| single choice | `Down` × option index, then `Enter`, which selects and advances |
 | multi choice | `Down`/`Enter` on every option whose checked state differs from the answer (Enter toggles and stays put), then `Tab` (Submit) on the form's last question |
 | typed answer | `Down` to the trailing `Custom` row, `Enter` to open its text field, the text itself, `Enter` to end it, then submit |
 | last question in the form | one more `Enter` submits (a single choice already leaves Submit focused; a multi choice needs the `Tab` first) |
@@ -82,7 +82,7 @@ one prompt at a time: each tick publishes the question currently on screen, and
 the form submits itself once the last one is answered.
 
 What it will not do: approve anything automatically, or send anything the
-dialog does not offer — a miss, a stale reply, a reply naming an option that is
+dialog does not offer: a miss, a stale reply, a reply naming an option that is
 not on screen, or a failed `tmux send-keys` just leaves the prompt to the
 Freebuff window, exactly as before. A reply that arrives after the dialog
 changed, or from another uid/mode/pid, is dropped rather than delivered, and the
@@ -93,7 +93,7 @@ discarded rather than replayed, because pressing the keys that already landed
 again would toggle an option back or type the answer twice.
 
 Limits worth knowing: a stopped session has no tmux pane to send to (`aoe
-session start` it first), and the wake key `F12` lands in the TUI unbound — the
+session start` it first), and the wake key `F12` lands in the TUI unbound: the
 worker reads the answer from the reply file, not from the keypress.
 
 ## Status command
