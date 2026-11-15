@@ -50,8 +50,8 @@ the row's status and to expose Freebuff in `aoe agents`, the agent picker, and
 
 That schema version is also the install floor. The host parses manifests
 strictly and rejects one whose schema version it does not know. `aoe_version`
-stays at `>=1.21.0, <2.0.0` because no released host parses API 22 yet: 22 exists
-only on the host's unreleased main (open host work on API 21 and 22). So this
+stays at `>=1.21.0, <2.0.0` because no released host parses API 22 yet: the
+latest host main is API 21, and 22 exists only in open host work. So this
 manifest cannot be released against a released host, and the `aoe_version` floor
 moves to the release that first parses 22, in the same change that ships it.
 `src/integration.ts` writes the report from the same pane classification as the
