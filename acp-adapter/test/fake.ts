@@ -52,6 +52,26 @@ export function acceptsSubmit(pane: FakePane): void {
   };
 }
 
+/**
+ * A settled screen whose composer holds `draft`: the shape the TUI draws while a
+ * prompt is typed but not yet submitted. `composerScreen` puts its rows in the
+ * transcript instead, where the composer's text never reaches, so a draft built
+ * with it would read as already submitted.
+ */
+export function draftScreen(draft: string, footer = "← for history · ? for help"): string {
+  return [
+    "  freebuff",
+    "",
+    "╭──────────────────────────────╮",
+    "│                              │",
+    `│  ▍${draft}`,
+    "│                              │",
+    "╰──────────────────────────────╯",
+    " DeepSeek V4.1 Flash Slow · /tmp · Chat: chat",
+    ` ${footer}`,
+  ].join("\n");
+}
+
 /** Deterministic clock: `sleep` advances virtual time instead of waiting. */
 export class FakeClock {
   time = 0;

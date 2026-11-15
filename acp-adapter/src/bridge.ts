@@ -246,7 +246,7 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
   }
 
   if (events.isCancelled()) {
-    await clearDraft(pane, promptText, typedView);
+    await clearDraft(pane, promptText, typedNeedle);
     return { stopReason: "cancelled", streamedChars };
   }
   // A composer that still holds the typed prompt never accepted the submit.
@@ -256,7 +256,7 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
   if (!submitted) {
     // Leaving the draft behind would corrupt the next turn: its prompt would be
     // typed after it and one Enter would submit both.
-    await clearDraft(pane, promptText, typedView);
+    await clearDraft(pane, promptText, typedNeedle);
     throw new RequestError(
       -32000,
       `the prompt was not submitted: the composer did not accept ${SUBMIT_KEY} after ${submitAttempts} attempts`,
@@ -374,7 +374,7 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
 
   while (config.now() < deadline) {
     if (events.isCancelled()) {
-      await clearDraft(pane, promptText, typedView);
+      await clearDraft(pane, promptText, typedNeedle);
       return { stopReason: "cancelled", streamedChars };
     }
 
@@ -630,22 +630,6 @@ function normalizeJoined(raw: string): string {
   return normalizeScreen(raw).join("\n");
 }
 
-/**
- * Delete the text this turn typed, so a stopped or failed turn leaves no draft.
- *
- * One step for every exit, because each of them has to undo the same typing. The
- * prompt is known exactly (it is what this turn typed), so removing it one
- * character at a time needs no assumption about a clear-line binding the TUI may
- * not have. The count is in code points, not `String.length`: a prompt holding an
- * astral character such as an emoji would otherwise get two backspaces for one
- * character and delete text typed before this turn. The repeat goes out as one
- * tmux call, since one call per character costs a process spawn each.
- *
- * `typedView` is the composer with the prompt typed. Once the screen has moved
- * on, the prompt is gone from the composer and the turn is writing output there,
- * so clearing would delete the turn's own text. Pass `null` while Enter has not
- * been pressed, when the draft is certainly still there.
- */
 /** The composer draws a very long draft truncated, so only its head is matched. */
 const PROMPT_NEEDLE_CHARS = 40;
 
@@ -662,12 +646,29 @@ function leftComposer(screen: string, typedNeedle: string): boolean {
   return !composer.includes(typedNeedle);
 }
 
+/**
+ * Delete the text this turn typed, so a stopped or failed turn leaves no draft.
+ *
+ * One step for every exit, because each of them has to undo the same typing. The
+ * prompt is known exactly (it is what this turn typed), so removing it one
+ * character at a time needs no assumption about a clear-line binding the TUI may
+ * not have. The count is in code points, not `String.length`: a prompt holding an
+ * astral character such as an emoji would otherwise get two backspaces for one
+ * character and delete text typed before this turn. The repeat goes out as one
+ * tmux call, since one call per character costs a process spawn each.
+ *
+ * `typedNeedle` guards the clear once Enter has been pressed. It is the same
+ * "the prompt left the composer" signal a submit is accepted on, so a repainting
+ * footer or caret cannot make a draft look like the turn's own output and leave
+ * it behind for the next turn to submit with its own prompt. Pass `null` before
+ * Enter, when the draft is certainly still there.
+ */
 async function clearDraft(
   pane: PaneSource,
   promptText: string,
-  typedView: string | null,
+  typedNeedle: string | null,
 ): Promise<void> {
-  if (typedView !== null && normalizeJoined(await pane.capture()) !== typedView) {
+  if (typedNeedle !== null && leftComposer(await pane.capture(), typedNeedle)) {
     return;
   }
   const length = Array.from(promptText).length;

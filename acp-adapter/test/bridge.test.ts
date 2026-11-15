@@ -8,7 +8,7 @@ import {
   type BridgeConfig,
   type TurnNotice,
 } from "../src/bridge.ts";
-import { acceptsSubmit, composerScreen, FakeClock, FakePane, READY_SCREEN } from "./fake.ts";
+import { acceptsSubmit, composerScreen, draftScreen, FakeClock, FakePane, READY_SCREEN } from "./fake.ts";
 
 const meta = { sessionId: "s1", cwd: "/tmp/project" };
 
@@ -163,32 +163,20 @@ describe("runTurn", () => {
     // The typed prompt can still be rendering when the next capture lands. That
     // repaint used to read as "accepted", so a turn that never started was
     // reported as one, and the prompt stayed in the composer.
-    const withDraft = (draft: string, footer: string): string =>
-      [
-        "  freebuff",
-        "",
-        "╭──────────────────────────────╮",
-        "│                              │",
-        `│  ▍${draft}`,
-        "│                              │",
-        "╰──────────────────────────────╯",
-        " DeepSeek V4.1 Flash Slow · /tmp · Chat: chat",
-        ` ${footer}`,
-      ].join("\n");
     const clock = new FakeClock();
     const pane = new FakePane(meta, composerScreen("boot"));
     const sink = collect();
     let enters = 0;
     pane.onSend = (keys, options) => {
       if (options?.literal) {
-        pane.screen = withDraft(keys, "← for history · ? for help");
+        pane.screen = draftScreen(keys, "← for history · ? for help");
         return;
       }
       if (keys !== "Enter") return;
       enters += 1;
       if (enters === 1) {
         // A repaint around the still-typed prompt: not a submit.
-        pane.screen = withDraft("do it", "← for history · ? for help.");
+        pane.screen = draftScreen("do it", "← for history · ? for help.");
         return;
       }
       pane.screen = composerScreen("thinking... ■ Esc");
@@ -247,7 +235,7 @@ describe("runTurn", () => {
         enters += 1; // every press is swallowed
         return;
       }
-      pane.screen = composerScreen("boot", `> ${keys}`);
+      pane.screen = draftScreen(keys);
     };
 
     // A prompt left in the composer is a failed submission, never a turn that
@@ -267,6 +255,40 @@ describe("runTurn", () => {
     );
   });
 
+  it("clears a failed turn's draft while the pane repaints its footer", async () => {
+    // The guard on the clear used to be whole-screen equality, but a submit is
+    // accepted on the composer being emptied. A footer that repaints on every
+    // poll differs from the typed screen while the prompt is still sitting in
+    // the composer, so the clear was skipped and the next prompt was typed onto
+    // the leftover draft and submitted with it.
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, composerScreen("boot"));
+    const sink = collect();
+    const promptText = "do it";
+    pane.onSend = (keys, options) => {
+      if (!options?.literal && keys === "Enter") return; // every press is swallowed
+      pane.screen = draftScreen(keys);
+    };
+    // Chrome only: the footer is not part of the composer, so it can churn while
+    // the prompt sits there untouched. It grows monotonically so no capture can
+    // land back on the typed screen and read as an unchanged one.
+    let paints = 0;
+    pane.onCapture = () => {
+      paints += 1;
+      const rows = pane.screen.split("\n");
+      rows[rows.length - 1] = ` ← for history · ? for help${".".repeat(paints)}`;
+      pane.screen = rows.join("\n");
+    };
+
+    await assert.rejects(
+      runTurn({ pane, promptText, config: testConfig(clock), events: sink.events }),
+      /was not submitted/,
+    );
+    const clears = pane.sent.filter((entry) => entry.keys === "BSpace");
+    assert.equal(clears.length, 1, "a repainting footer must not skip the clear");
+    assert.equal(clears[0].options?.repeat, Array.from(promptText).length);
+  });
+
   it("clears the draft when cancelled while the submit is unconfirmed", async () => {
     const clock = new FakeClock();
     const pane = new FakePane(meta, composerScreen("boot"));
@@ -279,18 +301,33 @@ describe("runTurn", () => {
     };
     pane.onSend = (keys, options) => {
       if (options?.literal) {
-        pane.screen = composerScreen("boot", `> ${keys}`); // the draft is in the composer
+        pane.screen = draftScreen(keys); // the draft is in the composer
       }
       // Enter is swallowed, so the composer still holds the draft when the
       // cancel arrives during the retry loop.
     };
+    // The footer keeps repainting, so the screen never matches the typed one and
+    // only the composer can say whether the draft is still there.
+    let paints = 0;
+    pane.onCapture = () => {
+      paints += 1;
+      const rows = pane.screen.split("\n");
+      rows[rows.length - 1] = ` ← for history · ? for help${".".repeat(paints)}`;
+      pane.screen = rows.join("\n");
+    };
+    // Late enough to land after Enter, inside the retry loop: a cancel during
+    // the submit delay exits before the loop and would not test this path.
     clock.onAdvance = (time) => {
-      if (time >= 300) cancelled = true;
+      if (time >= 400) cancelled = true;
     };
 
     const result = await runTurn({ pane, promptText, config: testConfig(clock), events });
 
     assert.equal(result.stopReason, "cancelled");
+    assert.ok(
+      pane.sent.some((entry) => entry.keys === "Enter"),
+      "the cancel must land inside the retry loop",
+    );
     const clears = pane.sent.filter((entry) => entry.keys === "BSpace");
     assert.equal(clears.length, 1, "the draft is cleared in one send");
     assert.equal(
