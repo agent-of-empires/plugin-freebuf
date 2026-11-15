@@ -29,6 +29,7 @@ import type { PaneSource } from "./pane.ts";
 
 export const INTERRUPT_KEY = "C-c";
 export const SUBMIT_KEY = "Enter";
+const CLEAR_KEY = "BSpace";
 
 export type BridgeConfig = {
   /** Delay between `capture-pane` polls. */
@@ -44,6 +45,12 @@ export type BridgeConfig = {
   maxTurnMs: number;
   /** How long to wait for the TUI to settle at its prompt before typing. */
   startupTimeoutMs: number;
+  /**
+   * Pause between typing the prompt and pressing Enter. Freebuff's input
+   * handler treats text that arrives with an Enter in the same burst as a
+   * paste and drops the Enter, so the two must not be sent back to back.
+   */
+  submitDelayMs: number;
   now: () => number;
   sleep: (ms: number) => Promise<void>;
 };
@@ -54,6 +61,7 @@ export const DEFAULT_BRIDGE_CONFIG: Omit<BridgeConfig, "now" | "sleep"> = {
   echoTimeoutMs: 10_000,
   maxTurnMs: 300_000,
   startupTimeoutMs: 90_000,
+  submitDelayMs: 150,
 };
 
 /**
@@ -164,6 +172,20 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
   // unquoted tmux send-keys would read words such as "Enter" inside the prompt
   // as key names.
   await pane.send(promptText, { literal: true });
+  // Let the typed text settle before pressing Enter. Sent in one burst, the
+  // Enter lands inside the TUI's paste window and is discarded, which looks
+  // exactly like a turn that started when it did not: the prompt stays in the
+  // composer and the screen never changes.
+  await config.sleep(config.submitDelayMs);
+  // A cancel during the pause must not be followed by a submit: the user asked
+  // for the turn to stop, and pressing Enter would start one anyway.
+  if (events.isCancelled()) {
+    // The prompt is already typed, so stopping here would leave a draft in the
+    // composer, and the next turn's prompt would be typed onto it and submitted
+    // together with it.
+    await clearTypedPrompt(pane, Array.from(promptText).length);
+    return { stopReason: "cancelled", streamedChars };
+  }
   await pane.send(SUBMIT_KEY);
 
   // Wait for the TUI to echo the prompt into the transcript so it is not
@@ -378,6 +400,9 @@ export async function resumeChat(request: ResumeRequest): Promise<ResumeResult> 
 
   // Pick the chat out of the TUI's history list instead.
   await pane.send("/history", { literal: true });
+  // The command is typed text followed by Enter, so it needs the same pause as
+  // a prompt: sent in one burst the Enter is read as paste content and dropped.
+  await config.sleep(config.submitDelayMs);
   await pane.send(SUBMIT_KEY);
   const deadline = config.now() + RESUME_PICKER_TIMEOUT_MS;
   let rows: string[] = [];
@@ -522,4 +547,22 @@ async function waitForReady(
  */
 function collapse(text: string): string {
   return text.replace(/[\s⎘•·△▽✕]/gu, "");
+}
+
+/**
+ * Delete the text this turn typed, so a stopped turn leaves no draft behind.
+ *
+ * The prompt is then known exactly (it is what this turn typed), so removing it
+ * one character at a time needs no assumption about a clear-line binding the TUI
+ * may not have. The count is in code points, not `String.length`: a prompt
+ * holding an astral character such as an emoji would otherwise get two
+ * backspaces for one character and delete text typed before this turn.
+ *
+ * The whole repeat goes out as one tmux call: one call per character costs a
+ * process spawn each, so a long pasted prompt would hold the cancel path for
+ * tens of seconds while the adapter still reports a turn in flight.
+ */
+async function clearTypedPrompt(pane: PaneSource, length: number): Promise<void> {
+  if (length === 0) return;
+  await pane.send(CLEAR_KEY, { repeat: length });
 }

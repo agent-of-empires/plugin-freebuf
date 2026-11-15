@@ -11,6 +11,12 @@ const execFileAsync = promisify(execFile);
 export type SendOptions = {
   /** Send the keys verbatim instead of interpreting them as tmux key names. */
   literal?: boolean;
+  /**
+   * Repeat the keys this many times in one tmux call. tmux's own count flag is
+   * used rather than one argv entry per key, which keeps the packed command
+   * under tmux's message limit however long the repeat is.
+   */
+  repeat?: number;
 };
 
 /**
@@ -214,6 +220,11 @@ export class TmuxPaneSource implements SessionPane {
     const args = ["send-keys", "-t", exactPane(this.options.session)];
     if (options?.literal) {
       args.push("-l");
+    }
+    if (options?.repeat !== undefined) {
+      // `-N <count>` repeats inside tmux, so the argv stays the same size
+      // however many repeats are asked for.
+      args.push("-N", String(options.repeat));
     }
     args.push("--", keys);
     await this.exec(args);

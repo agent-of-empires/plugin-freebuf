@@ -63,7 +63,10 @@ Scripts: `npm test` (node's built-in test runner), `npm run typecheck`.
    Freebuff paints its splash (and swaps its model) for seconds after launch and
    drops any keystroke sent in that window, so typing earlier loses the prompt.
 3. It sends the prompt as **literal** keys (`send-keys -l`, so a prompt
-   containing `Enter` is not interpreted as a keypress), then `Enter`.
+   containing `Enter` is not interpreted as a keypress), waits out the TUI's
+   paste window, then presses `Enter`. Sent in one burst the `Enter` is read as
+   part of a paste and dropped, which leaves the prompt typed in the composer
+   with no turn running.
 4. It waits for the user's message to reach the transcript and resets its diff
    baseline there, so the user's own text is never streamed as assistant output.
    (The *composer* echoes the text the moment it is typed; only the transcript
@@ -76,7 +79,9 @@ Scripts: `npm test` (node's built-in test runner), `npm run typecheck`.
    status line no longer says the agent is working, it answers the prompt with
    `stopReason: "end_turn"`.
 7. `session/cancel` sends the interrupt key (`C-c`) and the running turn
-   answers `stopReason: "cancelled"`.
+   answers `stopReason: "cancelled"`. A turn cancelled before it was submitted
+   deletes the text it typed, so the next prompt does not start from a stale
+   draft in the composer.
 
 ### What gets streamed
 
@@ -113,6 +118,7 @@ Bridge timing (override via `createAdapter({ bridge })`):
 | `echoTimeoutMs`    | `10000`  | How long to wait for the prompt echo             |
 | `maxTurnMs`        | `300000` | Caps the poll loop after the echo lands          |
 | `startupTimeoutMs` | `90000`  | Wait for the TUI to settle, then type            |
+| `submitDelayMs`    | `150`    | Wait out the paste window before `Enter`         |
 
 The readiness wait and the echo wait run before this cap starts, so a turn can
 take up to `startupTimeoutMs` plus `echoTimeoutMs` plus `maxTurnMs`.

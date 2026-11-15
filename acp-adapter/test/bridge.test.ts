@@ -18,6 +18,7 @@ function testConfig(clock: FakeClock, overrides: Partial<BridgeConfig> = {}): Br
     echoTimeoutMs: 500,
     maxTurnMs: 10_000,
     startupTimeoutMs: 1_000,
+    submitDelayMs: 150,
     now: clock.now,
     sleep: clock.sleep,
     ...overrides,
@@ -70,6 +71,62 @@ describe("runTurn", () => {
     );
     assert.equal(pane.sent[0].options?.literal, true, "prompt must be sent as literal text");
     assert.equal(pane.sent[1].options?.literal, undefined);
+  });
+
+  it("waits out the paste window before submitting", async () => {
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, composerScreen("boot"));
+    const sink = collect();
+    const sentAt: number[] = [];
+    pane.onSend = (keys) => {
+      sentAt.push(clock.time);
+      if (keys === "Enter") {
+        pane.screen = "boot\n> go";
+      }
+    };
+
+    await runTurn({ pane, promptText: "go", config: testConfig(clock), events: sink.events });
+
+    assert.equal(sentAt.length, 2, "the prompt is submitted exactly once when the TUI accepts it");
+    assert.ok(
+      sentAt[1] - sentAt[0] >= 150,
+      `Enter must not arrive in the same burst as the text (gap ${sentAt[1] - sentAt[0]}ms)`,
+    );
+  });
+
+  it("does not submit and clears the draft when cancelled during the paste window", async () => {
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, composerScreen("boot"));
+    let cancelled = false;
+    let enters = 0;
+    // Two code units for one character: counting UTF-16 units would clear one
+    // character too many and delete text typed before this turn.
+    const promptText = "go 😀";
+    const events = {
+      onChunk: () => {},
+      onNotice: () => {},
+      isCancelled: () => cancelled,
+    };
+    pane.onSend = (keys) => {
+      if (keys === "Enter") enters += 1;
+      // The cancel arrives once the prompt is typed but while the bridge is
+      // still waiting out the paste window, which is the window this guards.
+      if (keys === promptText) cancelled = true;
+    };
+
+    const result = await runTurn({ pane, promptText, config: testConfig(clock), events });
+
+    assert.equal(result.stopReason, "cancelled");
+    assert.equal(enters, 0, "a cancelled turn must not start a prompt");
+    // One send for the whole draft: a call per character costs a process spawn
+    // each, so a long pasted prompt would block the cancel path for seconds.
+    const clears = pane.sent.filter((entry) => entry.keys === "BSpace");
+    assert.equal(clears.length, 1, "the draft must be cleared in one send");
+    assert.equal(
+      clears[0].options?.repeat,
+      Array.from(promptText).length,
+      "the draft must be deleted one backspace per character, counted in code points",
+    );
   });
 
   it("does not stream the TUI echo of the user's own prompt", async () => {
@@ -722,6 +779,30 @@ describe("resumeChat", () => {
     assert.equal(opened(), "Remember the word ORA");
     // The footer shows the cut title, which is not the recorded one.
     assert.equal(result.restored, false);
+  });
+
+  it("pauses before Enter after typing /history, so the picker is not dropped", async () => {
+    // `/history` is typed text followed by Enter. Sent in one burst the Enter is
+    // read as paste content and dropped, exactly like a prompt, so the picker
+    // would never open.
+    const clock = new FakeClock();
+    const { pane } = pickerPane("Fix", ["just now   3 msgs   Fix"]);
+    const sentAt: { keys: string; time: number }[] = [];
+    const inner = pane.onSend;
+    pane.onSend = (keys) => {
+      sentAt.push({ keys, time: clock.time });
+      inner?.(keys);
+    };
+
+    await resumeChat({ pane, config: testConfig(clock), title: "Fix tests" });
+
+    const history = sentAt.find((entry) => entry.keys === "/history");
+    const enter = sentAt.find((entry) => entry.keys === "Enter");
+    assert.ok(history && enter, "the picker must be opened with /history then Enter");
+    assert.ok(
+      enter.time - history.time >= 150,
+      `Enter must not arrive in the same burst as /history (gap ${enter.time - history.time}ms)`,
+    );
   });
 
   it("does not open a chat when the recorded title is empty", async () => {

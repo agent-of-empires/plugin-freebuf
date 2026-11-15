@@ -207,4 +207,15 @@ describe("TmuxPaneSource.start", () => {
     assert.deepEqual(calls[1], ["send-keys", "-t", "=s:", "-l", "--", "hi"]);
     assert.deepEqual(calls[2], ["kill-session", "-t", "=s"]);
   });
+
+  it("repeats a key with tmux's count flag instead of one argv entry per repeat", async () => {
+    // A long draft is cleared by repeating BSpace. Expanding that into one argv
+    // entry per key pushes the packed command past tmux's 16 KB message limit
+    // (around 2,300 entries) and the clear fails with "command too long", so the
+    // count has to go through `-N` and leave the argv the same size.
+    const { exec, calls } = fakeTmux();
+    const pane = new TmuxPaneSource({ session: "s", exec });
+    await pane.send("BSpace", { repeat: 5_000 });
+    assert.deepEqual(calls[0], ["send-keys", "-t", "=s:", "-N", "5000", "--", "BSpace"]);
+  });
 });
