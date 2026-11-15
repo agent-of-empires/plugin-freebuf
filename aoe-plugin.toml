@@ -86,12 +86,12 @@ id = "aoe_freebuf_pane"
 kind = "command"
 command = [".aoe-build/node/bin/aoe-freebuf-worker"]
 
+# Dependencies and compiled output both stay under .aoe-build/, which the host
+# excludes from the plugin tree hash. Installing into the source root would add
+# node_modules/.bin symlinks outside that directory and break the load-time
+# re-hash, dropping the plugin to community trust.
 [[runtime.build]]
-command = ["npm", "install"]
-platforms = ["linux", "macos"]
-
-[[runtime.build]]
-command = ["npm", "run", "build"]
+command = ["node", "scripts/build.mjs"]
 platforms = ["linux", "macos"]
 
 # Generate a plugin-relative launcher under .aoe-build/node/bin that pins the
