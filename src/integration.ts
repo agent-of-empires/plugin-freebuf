@@ -1,14 +1,22 @@
-// The status-only AgentIntegrationSnapshot half of the host's agent-integration
-// contract (aoe-plugin-api/src/agent_integration.rs): a JSON report the host
-// reads from the session's private hook directory, `/tmp/aoe-hooks-<euid>/`,
-// and uses to override the session row's status. Directory mode must be 0700
-// and the report 0600, owned by the effective uid, at most 64 KiB and no more
-// than 15 seconds old, written by a live pid -- so it is rewritten every
-// heartbeat tick regardless of whether the status changed.
+// The AgentIntegrationSnapshot half of the host's agent-integration contract
+// (aoe-plugin-api/src/agent_integration.rs): a JSON report the host reads from
+// the session's private hook directory, `/tmp/aoe-hooks-<euid>/`, and uses to
+// override the session row's status and to offer its prompt to the user.
+// Directory mode must be 0700 and the report 0600, owned by the effective uid,
+// at most 64 KiB and no more than 15 seconds old, written by a live pid -- so
+// it is rewritten every heartbeat tick regardless of whether the status
+// changed.
 //
 // The same pane classification that drives the attention flag (src/pane.ts) is
 // written here too, so the row's status and the attention flag never disagree.
 // The report is one small JSON file per session per tick.
+//
+// A report that carries a `prompt` is what turns a blocked session into a
+// quick response: the host opens its reply dialog for the row, validates the
+// answer, and writes it to the reply sidecar (src/replies.ts) -- then wakes the
+// provider by sending the report's `reply_keys` into the pane. `revision`
+// changes exactly when the prompt does, and the host echoes it back in the
+// reply so an answer to a prompt that has since changed is dropped.
 
 import { chmodSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
@@ -22,6 +30,24 @@ export const PLUGIN_ID = "agent-of-empires.aoe-freebuf";
 /** Report file schema version; the host requires exactly 1. */
 export const SCHEMA_VERSION = 1;
 
+export interface IntegrationPromptOption {
+  label: string;
+  description?: string;
+}
+
+export interface IntegrationPromptQuestion {
+  id: string;
+  question: string;
+  options: IntegrationPromptOption[];
+  multi?: boolean;
+  recommended?: number;
+}
+
+/** The two prompt shapes the host renders; this plugin publishes questions. */
+export type IntegrationPrompt =
+  | { kind: "approval"; id: string; title: string; allow_always: boolean }
+  | { kind: "question"; id: string; title: string; questions: IntegrationPromptQuestion[] };
+
 export interface AgentIntegrationSnapshot {
   schema_version: number;
   instance_id: string;
@@ -31,8 +57,15 @@ export interface AgentIntegrationSnapshot {
   revision: number;
   status: PaneState;
   reply_keys: string[];
-  prompt: null;
+  prompt: IntegrationPrompt | null;
 }
+
+/**
+ * The wake key the host sends into the pane after the user submits a reply.
+ * It only has to be a key Freebuff leaves alone; the worker reads the answer
+ * from the reply file, not from the keypress.
+ */
+export const REPLY_WAKE_KEY = "F12";
 
 export function buildSnapshot(input: {
   instanceId: string;
@@ -40,19 +73,23 @@ export function buildSnapshot(input: {
   providerSessionId: string;
   status: PaneState;
   writerPid: number;
+  revision?: number;
+  prompt?: IntegrationPrompt | null;
 }): AgentIntegrationSnapshot {
+  const prompt = input.prompt ?? null;
   return {
     schema_version: SCHEMA_VERSION,
     instance_id: input.instanceId,
     provider_version: input.providerVersion,
     provider_session_id: input.providerSessionId,
     writer_pid: input.writerPid,
-    // `revision` and `reply_keys` only matter for prompts, and replies are off:
-    // status-only reports never change a prompt, so the revision stays 0.
-    revision: 0,
+    // Changes only when the prompt does, never for a status change.
+    revision: input.revision ?? 0,
     status: input.status,
-    reply_keys: [],
-    prompt: null,
+    // Required for a reply-enabled integration: the host refuses a prompt from
+    // a report that supplies no wake key.
+    reply_keys: prompt === null ? [] : [REPLY_WAKE_KEY],
+    prompt,
   };
 }
 

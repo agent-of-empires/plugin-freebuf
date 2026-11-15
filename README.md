@@ -52,9 +52,44 @@ strictly and rejects one whose schema version it does not know, so
 attention flag, every tick; the attention flag still works on its own, so a
 session stays visible in the attention order either way.
 
-Replies stay off: explicit replies need an in-process provider extension
-Freebuff's CLI does not have, so `reply_keys` stays empty and `prompt` stays
-null in the report.
+### Quick responses in the terminal session list
+
+When the blocker is a question, the session row can answer it: the worker
+publishes the dialog's own prompt and the manifest opts into provider-native
+replies (`replies = true`). Select the Freebuff session, press `a`, pick an
+option, and the answer reaches the TUI.
+
+| Step | Who | What |
+|---|---|---|
+| 1 | worker | parses `Some questions for you` off the pane: the expanded question, its `○`/`☐` option labels, whether it takes several, whether it offers a `Custom` typed answer, and whether it is the form's last question |
+| 2 | worker | reports `prompt` as `{ kind: "question", id, title, questions }` (`multi: true` for a multi-select question) with `reply_keys: ["F12"]` and a `revision` that changes only when the prompt does |
+| 3 | host | shows the question, validates the answer against the prompt, writes `integration-agent-of-empires.aoe-freebuf.reply.json` into the hook directory, then sends the wake key into the pane |
+| 4 | worker | on its next tick, validates that reply against the report it published, replays the answer as the dialog's own keypresses through `tmux send-keys`, and removes the reply file |
+
+Every question shape is delivered, because the dialog's own key semantics are
+replayed rather than guessed:
+
+| Question | Sent |
+|---|---|
+| every reply | `Up`, `Down`, `Left`, `Down` first: `Up` leaves Submit (where the form sits between being answered and being submitted) or steps the focus up a row, `Down` undoes a step back to the previous question, and `Left`/`Down` collapse and re-expand the open question, which puts the focus back on its first option — so the counts below hold wherever the focus was |
+| single choice | `Down` × option index, then `Enter` — Freebuff selects and advances |
+| multi choice | `Down`/`Enter` per chosen option (Enter toggles and stays put), then `Tab` (Submit) on the form's last question |
+| typed answer | `Down` to the trailing `Custom` row, `Enter` to open its text field, the text itself, `Enter` to end it, then submit |
+| last question in the form | one more `Enter` submits (a single choice already leaves Submit focused; a multi choice needs the `Tab` first) |
+
+Only one question is expanded at a time, so a multi-question form is answered
+one prompt at a time: each tick publishes the question currently on screen, and
+the form submits itself once the last one is answered.
+
+What it will not do: approve anything automatically, or send anything the
+dialog does not offer — a miss, a stale reply, a reply naming an option that is
+not on screen, or a failed `tmux send-keys` just leaves the prompt to the
+Freebuff window, exactly as before. A reply that arrives after the dialog
+changed, or from another uid/mode/pid, is dropped rather than delivered.
+
+Limits worth knowing: a stopped session has no tmux pane to send to (`aoe
+session start` it first), and the wake key `F12` lands in the TUI unbound — the
+worker reads the answer from the reply file, not from the keypress.
 
 ## Status command
 
@@ -91,11 +126,14 @@ src/
   rpc.ts               response builders
   freebuff.ts          reads Freebuff's local state for the status command
   pane.ts              captures a session pane and classifies its screen
+  dialog.ts            parses the blocking question modal into a prompt
+  replies.ts           validates the host's reply and maps it to keypresses
+  tmux.ts              resolves a session's pane and sends the keys
   attention.ts         writes the host's per-session urgent flag
   integration.ts       writes the row-status report the host reads
 scripts/
   write-aoe-wrapper.mjs generates the plugin-relative launcher
-test/                  worker, heartbeat, pane, attention-flag, state-probe, manifest tests
+test/                  worker, heartbeat, pane, dialog, reply, tmux, attention-flag, state-probe, manifest tests
 ```
 
 ## Develop

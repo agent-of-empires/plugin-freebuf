@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { FLAG_TTL_MS, heartbeat, processLine, sendRequest, setOutbound } from "../src/index";
+import { REPLY_FILENAME } from "../src/replies";
 
 const cleanups: string[] = [];
 
@@ -55,6 +56,14 @@ describe("worker/host multiplexing", () => {
 
 describe("attention heartbeat", () => {
   const WAITING = "╭──── Some questions for you ────╮\n│                      Close ✕ │";
+  const DIALOG = [
+    "╭──────────────────────────────── Some questions for you ─────────────────────────────────╮",
+    "│                                                                                 Close ✕ │",
+    "│ ▼ How far should the row shrink?                                                        │",
+    "│   ○ Icon only, drop sort/filter                                                         │",
+    "│   ○ Keep the label, drop the sort arrows                                                │",
+    "╰─────────────────────────────────────────────────────────────────────────────────────────╯",
+  ].join("\n");
   const RUNNING = " working...      1m 33s   ■ Esc\n ❯ ▍Add to the current task";
   const IDLE = " ❯ ▍Add to the current task (/ for commands)\n ← for history · ? for help";
 
@@ -154,6 +163,265 @@ describe("attention heartbeat", () => {
     await tick;
 
     expect(readFileSync(path.join(dir, "attention.json"), "utf8")).toBe(existing);
+  });
+
+  it("publishes the blocked dialog as a prompt the host can offer", async () => {
+    const { hookBase } = await runTick([{ id: "sess-dialog", tool: "freebuff" }], { "sess-dialog": DIALOG });
+    const published = report(hookBase, "sess-dialog");
+    expect(published).toMatchObject({ status: "waiting", revision: 0, reply_keys: ["F12"] });
+    const prompt = published?.prompt as { kind: string; title: string; questions: Array<Record<string, unknown>> };
+    expect(prompt.kind).toBe("question");
+    expect(prompt.title).toBe("How far should the row shrink?");
+    expect(prompt.questions[0]).toMatchObject({
+      question: "How far should the row shrink?",
+      options: [{ label: "Icon only, drop sort/filter" }, { label: "Keep the label, drop the sort arrows" }],
+    });
+  });
+
+  it("publishes no prompt for a session that is only flag-waiting", async () => {
+    // The bare "Close ✕" chrome has no question or options to answer.
+    const { hookBase } = await runTick([{ id: "sess-bare", tool: "freebuff" }], { "sess-bare": WAITING });
+    expect(report(hookBase, "sess-bare")).toMatchObject({ status: "waiting", reply_keys: [], prompt: null });
+  });
+
+  it("keeps the revision while the same dialog stays up and bumps it when it changes", async () => {
+    const hookBase = tempDir("aoe-hooks-");
+    const tick = async (pane: string): Promise<void> => {
+      const sent: string[] = [];
+      setOutbound((line) => sent.push(line));
+      const run = heartbeat({ hookBase, now: 1_700_000_000_000, capture: async () => pane, send: async () => true });
+      const request = JSON.parse(sent[0]) as { id: number };
+      processLine(
+        JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { sessions: [{ id: "sess-rev", tool: "freebuff" }] } }),
+      );
+      await run;
+    };
+
+    await tick(DIALOG);
+    expect(report(hookBase, "sess-rev")).toMatchObject({ revision: 0 });
+    await tick(DIALOG);
+    // Same question, same revision: a reply the user is writing stays valid.
+    expect(report(hookBase, "sess-rev")).toMatchObject({ revision: 0 });
+    await tick(DIALOG.replace("drop the sort arrows", "keep the sort arrows"));
+    expect(report(hookBase, "sess-rev")).toMatchObject({ revision: 1 });
+    await tick(IDLE);
+    // The prompt is gone, so its removal is a change too.
+    expect(report(hookBase, "sess-rev")).toMatchObject({ revision: 2, prompt: null, reply_keys: [] });
+  });
+
+  it("answers the dialog with the keys that select the chosen option", async () => {
+    const hookBase = tempDir("aoe-hooks-");
+    const dir = path.join(hookBase, "sess-answer");
+    const sent: string[] = [];
+    const delivered: Array<{ id: string; keys: string[] }> = [];
+    setOutbound((line) => sent.push(line));
+    const now = 1_700_000_000_000;
+    const tick = heartbeat({
+      hookBase,
+      now,
+      capture: async () => DIALOG,
+      send: async (id, steps) => {
+        delivered.push({ id, steps });
+        return true;
+      },
+    });
+    const request = JSON.parse(sent[0]) as { id: number };
+    processLine(
+      JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { sessions: [{ id: "sess-answer", tool: "freebuff" }] } }),
+    );
+    await tick;
+
+    // The host writes the answer after the user responds; the next tick delivers it.
+    const published = report(hookBase, "sess-answer") as Record<string, unknown>;
+    const prompt = published.prompt as { id: string; questions: Array<{ id: string }> };
+    const replyFile = path.join(dir, "integration-agent-of-empires.aoe-freebuf.reply.json");
+    writeFileSync(
+      replyFile,
+      JSON.stringify({
+        schema_version: 1,
+        instance_id: "sess-answer",
+        provider_session_id: published.provider_session_id,
+        writer_pid: published.writer_pid,
+        revision: published.revision,
+        prompt_id: prompt.id,
+        response_id: "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+        response: {
+          kind: "question",
+          answers: [{ id: prompt.questions[0].id, selected_options: ["Keep the label, drop the sort arrows"] }],
+        },
+      }),
+      { mode: 0o600 },
+    );
+    chmodSync(replyFile, 0o600);
+
+    setOutbound((line) => sent.push(line));
+    const second = heartbeat({
+      hookBase,
+      now,
+      capture: async () => DIALOG,
+      send: async (id, steps) => {
+        delivered.push({ id, steps });
+        return true;
+      },
+    });
+    const secondRequest = JSON.parse(sent[sent.length - 1]) as { id: number };
+    processLine(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: secondRequest.id,
+        result: { sessions: [{ id: "sess-answer", tool: "freebuff" }] },
+      }),
+    );
+    await second;
+
+    // Up/Down/Left/Down settle the focus on the first option, then Down reaches
+    // the second one: Enter selects it, and the last question leaves Submit
+    // focused, so the second Enter submits the form.
+    expect(delivered).toEqual([
+      { id: "sess-answer", steps: [{ keys: ["Up", "Down", "Left", "Down", "Down", "Enter", "Enter"] }] },
+    ]);
+    expect(existsSync(replyFile)).toBe(false); // consumed, so it cannot be replayed
+  });
+
+  it("answers a multi-select question by toggling each choice, then Submit", async () => {
+    const multi = [
+      "╭──────────────────────────────── Some questions for you ─────────────────────────────────╮",
+      "│                                                                                 Close ✕ │",
+      "│ ▼ Which checks should run?                                                              │",
+      "│   (Select multiple options)                                                             │",
+      "│   ☐ Unit tests                                                                          │",
+      "│   ☐ Lint                                                                                │",
+      "│   ☐ Custom                                                                              │",
+      "╰─────────────────────────────────────────────────────────────────────────────────────────╯",
+    ].join("\n");
+    const hookBase = tempDir("aoe-hooks-");
+    const dir = path.join(hookBase, "sess-multi");
+    const sent: string[] = [];
+    const delivered: unknown[] = [];
+    const runTick = async (): Promise<void> => {
+      setOutbound((line) => sent.push(line));
+      const tick = heartbeat({
+        hookBase,
+        now: 1_700_000_000_000,
+        capture: async () => multi,
+        send: async (id, steps) => {
+          delivered.push({ id, steps });
+          return true;
+        },
+      });
+      const request = JSON.parse(sent[sent.length - 1]) as { id: number };
+      processLine(
+        JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { sessions: [{ id: "sess-multi", tool: "freebuff" }] } }),
+      );
+      await tick;
+    };
+    await runTick();
+
+    const published = report(hookBase, "sess-multi") as Record<string, unknown>;
+    const prompt = published.prompt as { id: string; questions: Array<Record<string, unknown>> };
+    expect(prompt.questions[0]).toMatchObject({ multi: true });
+    const replyFile = path.join(dir, REPLY_FILENAME);
+    writeFileSync(
+      replyFile,
+      JSON.stringify({
+        schema_version: 1,
+        instance_id: "sess-multi",
+        provider_session_id: published.provider_session_id,
+        writer_pid: published.writer_pid,
+        revision: published.revision,
+        prompt_id: prompt.id,
+        response_id: "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+        response: {
+          kind: "question",
+          answers: [{ id: (prompt.questions[0] as { id: string }).id, selected_options: ["Unit tests", "Lint"] }],
+        },
+      }),
+      { mode: 0o600 },
+    );
+    chmodSync(replyFile, 0o600);
+    await runTick();
+
+    expect(delivered).toEqual([
+      { id: "sess-multi", steps: [{ keys: ["Up", "Down", "Left", "Down", "Enter", "Down", "Enter", "Tab", "Enter"] }] },
+    ]);
+    expect(existsSync(replyFile)).toBe(false);
+  });
+
+  it("leaves a reply that does not match the published prompt alone", async () => {
+    const hookBase = tempDir("aoe-hooks-");
+    const dir = path.join(hookBase, "sess-stale");
+    mkdirSync(dir, { recursive: true });
+    const replyFile = path.join(dir, "integration-agent-of-empires.aoe-freebuf.reply.json");
+    writeFileSync(replyFile, JSON.stringify({ schema_version: 1, instance_id: "other" }), { mode: 0o600 });
+    chmodSync(replyFile, 0o600);
+
+    const delivered: string[][] = [];
+    const sent: string[] = [];
+    setOutbound((line) => sent.push(line));
+    const tick = heartbeat({
+      hookBase,
+      now: 1_700_000_000_000,
+      capture: async () => DIALOG,
+      send: async (_id, keys) => {
+        delivered.push(keys);
+        return true;
+      },
+    });
+    const request = JSON.parse(sent[0]) as { id: number };
+    processLine(
+      JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { sessions: [{ id: "sess-stale", tool: "freebuff" }] } }),
+    );
+    await tick;
+
+    expect(delivered).toEqual([]);
+    expect(existsSync(replyFile)).toBe(true);
+  });
+
+  it("keeps a reply it could not deliver for the next tick", async () => {
+    const hookBase = tempDir("aoe-hooks-");
+    const dir = path.join(hookBase, "sess-gone");
+    const sent: string[] = [];
+    const runTickWith = async (deliver: boolean): Promise<void> => {
+      setOutbound((line) => sent.push(line));
+      const tick = heartbeat({
+        hookBase,
+        now: 1_700_000_000_000,
+        capture: async () => DIALOG,
+        send: async () => deliver,
+      });
+      const request = JSON.parse(sent[sent.length - 1]) as { id: number };
+      processLine(
+        JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { sessions: [{ id: "sess-gone", tool: "freebuff" }] } }),
+      );
+      await tick;
+    };
+    await runTickWith(true);
+
+    const published = report(hookBase, "sess-gone") as Record<string, unknown>;
+    const prompt = published.prompt as { id: string; questions: Array<{ id: string }> };
+    const replyFile = path.join(dir, "integration-agent-of-empires.aoe-freebuf.reply.json");
+    writeFileSync(
+      replyFile,
+      JSON.stringify({
+        schema_version: 1,
+        instance_id: "sess-gone",
+        provider_session_id: published.provider_session_id,
+        writer_pid: published.writer_pid,
+        revision: published.revision,
+        prompt_id: prompt.id,
+        response_id: "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+        response: { kind: "question", answers: [{ id: prompt.questions[0].id, selected_options: ["Keep the label, drop the sort arrows"] }] },
+      }),
+      { mode: 0o600 },
+    );
+    chmodSync(replyFile, 0o600);
+
+    // The pane vanished between capture and send: the answer is not consumed.
+    await runTickWith(false);
+    expect(existsSync(replyFile)).toBe(true);
+
+    await runTickWith(true);
+    expect(existsSync(replyFile)).toBe(false);
   });
 
   it("survives the host not answering", async () => {

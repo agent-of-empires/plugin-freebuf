@@ -14,13 +14,17 @@
 // jump-to-next-attention read, so a session blocked on a question surfaces
 // exactly like a native agent's Waiting row -- without a text column.
 
+import * as os from "node:os";
 import * as readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { clearUrgent, hookBase, instanceHookDir, writeUrgent } from "./attention.js";
+import { dialogPrompt, parsePaneDialog, type PaneDialog } from "./dialog.js";
 import { allProjectActivities, configDir, latestChat, providerVersion } from "./freebuff.js";
-import { buildSnapshot, writeReport } from "./integration.js";
+import { buildSnapshot, writeReport, type AgentIntegrationSnapshot, type IntegrationPrompt } from "./integration.js";
 import { capturePane, classifyPane } from "./pane.js";
+import { consumeReply, deliverySteps, readReply } from "./replies.js";
 import { MethodNotFoundError, RpcResponse, errorResponse, resultResponse } from "./rpc.js";
+import { sendKeysToPane, type KeySender } from "./tmux.js";
 
 const RUNTIME = "node";
 
@@ -173,6 +177,76 @@ export interface HeartbeatOptions {
   now?: number;
   /** Pane reader, injectable for tests. Null means the pane is unknown. */
   capture?: (sessionId: string) => Promise<string | null>;
+  /** Key sender for a quick response, injectable for tests. */
+  send?: KeySender;
+  /** Effective uid that owns the hook directory, injectable for tests. */
+  euid?: number;
+}
+
+/**
+ * Each session's published prompt and the revision counter that goes with it.
+ * The revision changes only when the prompt does, never with the status, which
+ * is what the host echoes back in a reply to reject an answer to a prompt that
+ * has since changed.
+ */
+const promptState = new Map<string, { id: string | null; revision: number }>();
+
+function revisionFor(sessionId: string, prompt: IntegrationPrompt | null): number {
+  const id = prompt?.id ?? null;
+  const entry = promptState.get(sessionId);
+  if (entry === undefined) {
+    promptState.set(sessionId, { id, revision: 0 });
+    return 0;
+  }
+  if (entry.id !== id) {
+    entry.id = id;
+    entry.revision += 1;
+  }
+  return entry.revision;
+}
+
+/**
+ * Deliver the user's answer to the dialog this tick published, if the host has
+ * written one. The reply is validated against the snapshot first, so an answer
+ * to a dialog that has since changed never reaches the pane.
+ */
+async function answerReply(
+  dir: string,
+  sessionId: string,
+  snapshot: AgentIntegrationSnapshot,
+  dialog: PaneDialog,
+  send: KeySender,
+  euid: number,
+): Promise<void> {
+  const reply = readReply(dir, snapshot, euid);
+  if (reply === null) return;
+  const steps = deliverySteps(reply, snapshot, dialog);
+  if (steps === null) {
+    note(`reply for ${sessionId} asks for something this dialog does not offer; leaving it alone`);
+    return;
+  }
+  let delivered = false;
+  try {
+    delivered = await send(sessionId, steps);
+  } catch (err) {
+    note(`reply send failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  if (!delivered) {
+    // The pane may be gone this tick; the next one retries the same file.
+    note(`reply for ${sessionId} could not be delivered`);
+    return;
+  }
+  try {
+    consumeReply(dir);
+  } catch (err) {
+    note(`reply cleanup failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const answer = reply.response.answers[0];
+  const chosen = [...(answer?.selected_options ?? []), answer?.custom_input?.trim() ?? ""]
+    .filter((part) => part !== "")
+    .join(", ");
+  note(`${sessionId}: answered "${chosen}"`);
 }
 
 /**
@@ -183,6 +257,8 @@ export interface HeartbeatOptions {
 export async function heartbeat(options: HeartbeatOptions = {}): Promise<void> {
   const base = options.hookBase ?? hookBase();
   const capture = options.capture ?? capturePane;
+  const send = options.send ?? sendKeysToPane;
+  const euid = options.euid ?? os.userInfo().uid;
   const root = options.configRoot ?? configDir();
   const now = options.now ?? Date.now();
   const version = providerVersion(root);
@@ -228,24 +304,32 @@ export async function heartbeat(options: HeartbeatOptions = {}): Promise<void> {
           seen.set(id, state);
           note(`${id}: ${state}`);
         }
+        // A blocking dialog becomes the row's quick-response prompt; the same
+        // question keeps its id, so the host's answers stay valid until the
+        // screen moves on.
+        const dialog = state === "waiting" ? parsePaneDialog(pane) : null;
+        const prompt = dialog === null ? null : dialogPrompt(dialog);
+        const snapshot = buildSnapshot({
+          instanceId: id,
+          providerVersion: version ?? "",
+          providerSessionId: projectPath === "" ? "" : (latestChat(root, projectPath)?.chatId ?? ""),
+          status: state,
+          writerPid: process.pid,
+          revision: revisionFor(id, prompt),
+          prompt,
+        });
         try {
           if (state === "waiting") writeUrgent(dir, now + FLAG_TTL_MS);
           else clearUrgent(dir);
-          // The host reads this report as the row's own status.
-          writeReport(
-            dir,
-            buildSnapshot({
-              instanceId: id,
-              providerVersion: version ?? "",
-              providerSessionId: projectPath === "" ? "" : (latestChat(root, projectPath)?.chatId ?? ""),
-              status: state,
-              writerPid: process.pid,
-            }),
-          );
+          // The host reads this report as the row's own status and, with a
+          // prompt in it, as the dialog the row can answer.
+          writeReport(dir, snapshot);
         } catch (err) {
           // Not writable, or the path was squatted: skip this session this tick.
           note(`flag write failed for ${id}: ${err instanceof Error ? err.message : String(err)}`);
+          return;
         }
+        if (prompt !== null && dialog !== null) await answerReply(dir, id, snapshot, dialog, send, euid);
       }),
     );
   }
