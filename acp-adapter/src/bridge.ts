@@ -17,6 +17,7 @@ import {
   ScreenTracker,
   chatHistoryRows,
   chatTitle,
+  composerText,
   diffScreens,
   extractTranscript,
   isChatHistoryScreen,
@@ -199,6 +200,10 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
   // against: the TUI reacts to a submit by taking the text out of the composer.
   const typedScreen = await pane.capture();
   const typedView = normalizeJoined(typedScreen);
+  // What the composer shows of the prompt, which is what a submit takes away.
+  // A long prompt is wrapped across rows, so the comparison is collapsed, and
+  // only its beginning is needed: the TUI truncates a very long draft.
+  const typedNeedle = collapse(promptText).slice(0, PROMPT_NEEDLE_CHARS);
   if (events.isCancelled()) {
     await clearDraft(pane, promptText, null);
     return { stopReason: "cancelled", streamedChars };
@@ -221,7 +226,10 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
     await config.sleep(Math.min(config.pollIntervalMs, remainingMs));
     if (events.isCancelled()) break;
     const screen = await pane.capture();
-    if (normalizeJoined(screen) !== typedView) {
+    // A cancel can arrive while the capture is in flight; pressing Enter now
+    // would start the turn the user just asked to stop.
+    if (events.isCancelled()) break;
+    if (normalizeJoined(screen) !== typedView && leftComposer(screen, typedNeedle)) {
       submitted = true; // the TUI reacted: the prompt left the composer
       break;
     }
@@ -638,6 +646,22 @@ function normalizeJoined(raw: string): string {
  * so clearing would delete the turn's own text. Pass `null` while Enter has not
  * been pressed, when the draft is certainly still there.
  */
+/** The composer draws a very long draft truncated, so only its head is matched. */
+const PROMPT_NEEDLE_CHARS = 40;
+
+/**
+ * True when the composer no longer holds the typed prompt. Any repaint used to
+ * count as a submit, but the prompt can still be rendering in the composer when
+ * the next capture lands, and a turn that never started would then be reported
+ * as one. A screen with no composer at all (the TUI switched to a writing view)
+ * counts as accepted.
+ */
+function leftComposer(screen: string, typedNeedle: string): boolean {
+  if (typedNeedle === "") return true;
+  const composer = collapse(composerText(screen));
+  return !composer.includes(typedNeedle);
+}
+
 async function clearDraft(
   pane: PaneSource,
   promptText: string,

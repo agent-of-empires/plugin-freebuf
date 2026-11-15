@@ -418,6 +418,16 @@ function dropChromeBoxes(lines: readonly string[]): string[] {
 }
 
 /**
+ * The bottom chrome block, which holds the composer and the footer. A prompt
+ * that has not been submitted is still drawn here, so this is where acceptance
+ * of a submit can be told apart from any other repaint.
+ */
+export function composerText(raw: string): string {
+  const lines = normalizeScreen(raw);
+  return lines.slice(chromeStart(lines)).join("\n");
+}
+
+/**
  * The conversation part of a raw pane capture: normalized lines with the
  * bottom chrome block and overlays removed, decoration rows dropped, and
  * trailing padding trimmed. This is what the bridge diffs and streams; the

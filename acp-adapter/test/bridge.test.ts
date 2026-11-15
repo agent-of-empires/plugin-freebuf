@@ -159,6 +159,82 @@ describe("runTurn", () => {
     assert.equal(sink.chunks.join("\n").includes("do it"), false, "the echoed prompt must not be streamed");
   });
 
+  it("does not count a repaint as a submit while the prompt is still in the composer", async () => {
+    // The typed prompt can still be rendering when the next capture lands. That
+    // repaint used to read as "accepted", so a turn that never started was
+    // reported as one, and the prompt stayed in the composer.
+    const withDraft = (draft: string, footer: string): string =>
+      [
+        "  freebuff",
+        "",
+        "╭──────────────────────────────╮",
+        "│                              │",
+        `│  ▍${draft}`,
+        "│                              │",
+        "╰──────────────────────────────╯",
+        " DeepSeek V4.1 Flash Slow · /tmp · Chat: chat",
+        ` ${footer}`,
+      ].join("\n");
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, composerScreen("boot"));
+    const sink = collect();
+    let enters = 0;
+    pane.onSend = (keys, options) => {
+      if (options?.literal) {
+        pane.screen = withDraft(keys, "← for history · ? for help");
+        return;
+      }
+      if (keys !== "Enter") return;
+      enters += 1;
+      if (enters === 1) {
+        // A repaint around the still-typed prompt: not a submit.
+        pane.screen = withDraft("do it", "← for history · ? for help.");
+        return;
+      }
+      pane.screen = composerScreen("thinking... ■ Esc");
+    };
+
+    const result = await runTurn({ pane, promptText: "do it", config: testConfig(clock), events: sink.events });
+
+    assert.equal(result.stopReason, "end_turn");
+    assert.equal(enters, 2, "a repaint that keeps the draft must be submitted again");
+  });
+
+  it("sends no Enter when the cancel lands during a retry capture", async () => {
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, composerScreen("boot"));
+    let cancelled = false;
+    let enters = 0;
+    const events = {
+      onChunk: () => {},
+      onNotice: () => {},
+      isCancelled: () => cancelled,
+    };
+    acceptsSubmit(pane);
+    pane.onSend = (keys, options) => {
+      if (options?.literal) {
+        pane.screen = composerScreen("boot", `> ${keys}`);
+        return;
+      }
+      if (keys === "Enter") enters += 1; // swallowed, so a retry is due
+    };
+    // The cancel arrives while the retry's capture is in flight, at a poll where
+    // that very capture would otherwise be followed by the retry press.
+    pane.onCapture = () => {
+      if (enters >= 1) cancelled = true;
+    };
+
+    const result = await runTurn({
+      pane,
+      promptText: "go",
+      config: testConfig(clock, { pollIntervalMs: 100, echoTimeoutMs: 300 }),
+      events,
+    });
+
+    assert.equal(result.stopReason, "cancelled");
+    assert.equal(enters, 1, "a retry must not press Enter after a cancel");
+  });
+
   it("fails the turn when the pane never accepts the submit", async () => {
     const clock = new FakeClock();
     const pane = new FakePane(meta, composerScreen("boot"));

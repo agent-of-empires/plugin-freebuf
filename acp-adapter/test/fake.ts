@@ -77,6 +77,8 @@ export class FakePane implements SessionPane {
   stopped = false;
   /** Hook invoked on every `send`, used to model the TUI echoing a prompt. */
   onSend?: (keys: string, options?: SendOptions) => void;
+  /** Hook invoked on every `capture`, used to model events during a poll. */
+  onCapture?: () => void;
   /** Whatever the factory was called with, for assertions. */
   readonly meta: PaneRequest;
 
@@ -87,6 +89,7 @@ export class FakePane implements SessionPane {
 
   capture(): Promise<string> {
     this.captures += 1;
+    this.onCapture?.();
     return Promise.resolve(this.screen);
   }
 
