@@ -70,13 +70,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * True when the text carries anything a terminal would interpret: it is typed
- * into the dialog's text field as one line, so no control characters travel.
+ * True when the text carries anything a terminal would interpret: the C0 and
+ * C1 control ranges (DEL included), or a Unicode line or paragraph separator.
+ * The text is typed into the dialog's text field as one line, so none of them
+ * travel.
  */
 export function hasControlCharacters(text: string): boolean {
   for (const char of text) {
     const code = char.codePointAt(0) ?? 0;
-    if (code < 0x20 || code === 0x7f) return true;
+    // C1 matters as much as C0: xterm still acts on 0x84, 0x85 and 0x88, and
+    // U+2028/U+2029 render as line breaks wherever the text is shown.
+    if (code < 0x20 || (code >= 0x7f && code <= 0x9f) || code === 0x2028 || code === 0x2029) {
+      return true;
+    }
   }
   return false;
 }

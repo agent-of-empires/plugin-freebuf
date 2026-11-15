@@ -172,6 +172,10 @@ describe("reply sidecar", () => {
       { selected_options: [] },
       { selected_options: [], custom_input: "   " },
       { selected_options: [], custom_input: "two\nlines" },
+      // A terminal acts on these too: C1 NEL, DEL, and the Unicode separators.
+      { selected_options: [], custom_input: "nel\u0085break" },
+      { selected_options: [], custom_input: "del\u007fbreak" },
+      { selected_options: [], custom_input: "line\u2028break" },
     ];
     for (const entry of answers) {
       writeReplyFile(dir, answer(entry));
