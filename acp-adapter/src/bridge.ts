@@ -400,6 +400,9 @@ export async function resumeChat(request: ResumeRequest): Promise<ResumeResult> 
 
   // Pick the chat out of the TUI's history list instead.
   await pane.send("/history", { literal: true });
+  // The command is typed text followed by Enter, so it needs the same pause as
+  // a prompt: sent in one burst the Enter is read as paste content and dropped.
+  await config.sleep(config.submitDelayMs);
   await pane.send(SUBMIT_KEY);
   const deadline = config.now() + RESUME_PICKER_TIMEOUT_MS;
   let rows: string[] = [];
@@ -549,14 +552,17 @@ function collapse(text: string): string {
 /**
  * Delete the text this turn typed, so a stopped turn leaves no draft behind.
  *
- * The prompt is then known exactly -- it is what this turn typed -- so removing
- * it one character at a time needs no assumption about a clear-line binding the
- * TUI may not have. The count is in code points, not `String.length`: a prompt
+ * The prompt is then known exactly (it is what this turn typed), so removing it
+ * one character at a time needs no assumption about a clear-line binding the TUI
+ * may not have. The count is in code points, not `String.length`: a prompt
  * holding an astral character such as an emoji would otherwise get two
  * backspaces for one character and delete text typed before this turn.
+ *
+ * The whole repeat goes out as one tmux call: one call per character costs a
+ * process spawn each, so a long pasted prompt would hold the cancel path for
+ * tens of seconds while the adapter still reports a turn in flight.
  */
 async function clearTypedPrompt(pane: PaneSource, length: number): Promise<void> {
-  for (let i = 0; i < length; i += 1) {
-    await pane.send(CLEAR_KEY);
-  }
+  if (length === 0) return;
+  await pane.send(CLEAR_KEY, { repeat: length });
 }
