@@ -191,6 +191,19 @@ export interface HeartbeatOptions {
  */
 const promptState = new Map<string, { id: string | null; revision: number }>();
 
+/**
+ * The reply each session last left in place, so an answer that never gets
+ * consumed is noted once instead of on every tick; a new reply is noted again.
+ * Keyed by session so the map cannot grow with the replies that pass through.
+ */
+const reportedReplies = new Map<string, string>();
+
+function noteOncePerReply(sessionId: string, responseId: string, message: string): void {
+  if (reportedReplies.get(sessionId) === responseId) return;
+  reportedReplies.set(sessionId, responseId);
+  note(message);
+}
+
 function revisionFor(sessionId: string, prompt: IntegrationPrompt | null): number {
   const id = prompt?.id ?? null;
   const entry = promptState.get(sessionId);
@@ -223,7 +236,11 @@ async function answerReply(
   if (reply === null) return;
   const steps = deliverySteps(reply, snapshot, dialog);
   if (steps === null) {
-    note(`reply for ${sessionId} asks for something this dialog does not offer; leaving it alone`);
+    noteOncePerReply(
+      sessionId,
+      reply.response_id,
+      `reply for ${sessionId} asks for something this dialog does not offer; leaving it alone`,
+    );
     return;
   }
   // Resolving the pane is asynchronous and the user may have answered this
@@ -248,13 +265,18 @@ async function answerReply(
   }
   try {
     consumeReply(dir);
+    reportedReplies.delete(sessionId);
   } catch (err) {
     note(`reply cleanup failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
   }
   if (outcome === "partial") {
     // Part of the sequence is already in the pane, so replaying it would press
     // those keys twice; the dialog is left for the user instead.
-    note(`reply for ${sessionId} was only partly delivered; not retrying, answer it in the Freebuff window`);
+    noteOncePerReply(
+      sessionId,
+      reply.response_id,
+      `reply for ${sessionId} was only partly delivered; not retrying, answer it in the Freebuff window`,
+    );
     return;
   }
   const answer = reply.response.answers[0];
