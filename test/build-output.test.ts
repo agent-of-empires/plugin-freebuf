@@ -1,6 +1,15 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, readdirSync, lstatSync, rmSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,13 +22,14 @@ import { afterAll, describe, expect, it } from "vitest";
  * community trust, which the reserved-namespace gate then refuses.
  *
  * This test reproduces the host's hash and asserts that running the build steps
- * declared in `aoe-plugin.toml` leaves it unchanged. Regression test for the
- * build writing `node_modules/` (with `.bin` symlinks) and `dist/` into the
- * source root.
+ * declared in `aoe-plugin.toml` leaves it unchanged and produces the worker the
+ * runtime entrypoint points at. Regression test for the build writing
+ * `node_modules/` (with `.bin` symlinks) and `dist/` into the source root.
  */
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const BUILD_DIR = ".aoe-build";
+const WORKER = path.join(BUILD_DIR, "dist", "index.js");
 const PREFIX = Buffer.from("aoe-plugin-tree-hash-v1\0", "latin1");
 
 /** Mirrors `integrity::tree_hash` in the aoe host: sorted rel paths + contents. */
@@ -57,53 +67,84 @@ function treeHash(root: string): string {
   return `sha256:${hash.digest("hex")}`;
 }
 
+/**
+ * Copies the current working tree's tracked files, and nothing else, so an
+ * unrelated local build (`dist/`, `node_modules/`) cannot influence the hash.
+ */
+function copyTrackedTree(dest: string): void {
+  const listing = execFileSync("git", ["ls-files", "-z"], { cwd: ROOT }).toString("utf8");
+  for (const rel of listing.split("\0").filter(Boolean)) {
+    const target = path.join(dest, rel);
+    mkdirSync(path.dirname(target), { recursive: true });
+    copyFileSync(path.join(ROOT, rel), target);
+  }
+}
+
 const scratch = mkdtempSync(path.join(tmpdir(), "aoe-freebuf-hash-"));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 describe("build output stays inside .aoe-build/", () => {
-  it("leaves the host tree hash unchanged after the declared build steps", () => {
-    // Git-tracked sources only, so an unrelated local build cannot influence this.
+  it("leaves the host tree hash unchanged and produces the worker", () => {
     const work = path.join(scratch, "tree");
-    execFileSync("git", ["clone", "--quiet", "--no-hardlinks", ".", work], { cwd: ROOT });
+    copyTrackedTree(work);
 
     rmSync(path.join(work, BUILD_DIR), { recursive: true, force: true });
     const before = treeHash(work);
 
-    for (const step of buildCommands()) {
-      execFileSync("sh", ["-c", step], { cwd: work, stdio: "pipe" });
+    // Run each declared command as an argv array, exactly as the host does; a
+    // shell would let quoting or `sh -c` hide which command actually ran.
+    for (const argv of buildCommands()) {
+      execFileSync(argv[0], argv.slice(1), { cwd: work, stdio: "pipe" });
     }
 
-    // Fails loudly on any symlink placed outside .aoe-build/.
+    // Throws on any symlink placed outside .aoe-build/.
     expect(treeHash(work)).toBe(before);
-    expect(treeHash(work)).not.toBe("");
+    // The runtime entrypoint is `.aoe-build/node/bin/aoe-freebuf-worker`, which
+    // wraps this file; a green hash with no worker would still be broken.
+    expect(existsSync(path.join(work, WORKER))).toBe(true);
   }, 180_000);
 
-  it("declares no build step that writes outside .aoe-build/", () => {
-    // A cheap structural guard so the failure is named, not just a hash diff.
-    for (const step of buildCommands()) {
-      expect(step).not.toMatch(/npm\s+(install|ci)(?!.*--prefix\s+\.aoe-build)/);
+  it("declares no build step that installs into the source root", () => {
+    for (const argv of buildCommands()) {
+      const npmInstall = argv[0] === "npm" && (argv[1] === "install" || argv[1] === "ci");
+      if (npmInstall) expect(argv).toContain("--prefix");
     }
   });
 });
 
-/** `command = [...]` entries of every `[[runtime.build]]` table, joined. */
-function buildCommands(): string[] {
+/**
+ * `command = [...]` of every `[[runtime.build]]` table, in declaration order,
+ * as argv arrays. Anything this cannot parse is an error rather than a skip: a
+ * step that disappears from the list would weaken the hash check silently.
+ */
+function buildCommands(): string[][] {
   const text = readFileSync(path.join(ROOT, "aoe-plugin.toml"), "utf8");
-  const steps: string[] = [];
+  const commands: string[][] = [];
   let inBuild = false;
+  let tableHasCommand = false;
+
   for (const line of text.split("\n")) {
     const trimmed = line.trim();
     if (trimmed.startsWith("[")) {
+      if (inBuild && !tableHasCommand) throw new Error("[[runtime.build]] with no command");
       inBuild = trimmed === "[[runtime.build]]";
+      tableHasCommand = false;
       continue;
     }
     if (!inBuild) continue;
-    const match = /^command\s*=\s*\[(.*)\]$/.exec(trimmed);
+    const match = /^command\s*=\s*(\[.*\])\s*(?:#.*)?$/.exec(trimmed);
     if (!match) continue;
-    const parts = match[1].split(",").map((part) => part.trim());
-    steps.push(parts.map((part) => part.replace(/^"|"$/g, "")).join(" "));
+    if (tableHasCommand) throw new Error("duplicate command in [[runtime.build]]");
+    const argv: unknown = JSON.parse(match[1]);
+    if (!Array.isArray(argv) || argv.length === 0 || !argv.every((part) => typeof part === "string")) {
+      throw new Error(`[[runtime.build]] command is not a non-empty string array: ${match[1]}`);
+    }
+    commands.push(argv as string[]);
+    tableHasCommand = true;
   }
+  if (inBuild && !tableHasCommand) throw new Error("[[runtime.build]] with no command");
+
   // Nothing declared means nothing to verify; fail rather than pass silently.
-  expect(steps.length).toBeGreaterThan(0);
-  return steps;
+  expect(commands.length).toBeGreaterThan(0);
+  return commands;
 }
