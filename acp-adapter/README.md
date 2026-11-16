@@ -72,7 +72,12 @@ Scripts: `npm test` (node's built-in test runner), `npm run typecheck`.
    reporting an `end_turn` that never ran. Acceptance is the draft leaving the
    composer box, so a draft wrapped over rows and a footer repeating the
    prompt's words are both read correctly, and one last capture before the
-   failure catches a press that lands after the last poll.
+   failure catches a press that lands after the last poll. The draft has to be
+   seen *in* the composer before `Enter` is pressed at all: a pane that has not
+   drawn it yet has an empty composer, where "the prompt left" is true from the
+   first capture, so one repainting footer would pass for a submit that never
+   happened. A draft that never appears fails the turn, and the typing is undone
+   so it cannot leak into the next one.
 4. It waits for the user's message to reach the transcript and resets its diff
    baseline there, so the user's own text is never streamed as assistant output.
    (The *composer* echoes the text the moment it is typed; only the transcript

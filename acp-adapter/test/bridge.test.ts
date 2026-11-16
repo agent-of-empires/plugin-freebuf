@@ -146,11 +146,7 @@ describe("runTurn", () => {
     const pane = new FakePane(meta, composerScreen("boot"));
     const sink = collect();
     let enters = 0;
-    pane.onSend = (keys, options) => {
-      if (options?.literal) {
-        pane.screen = composerScreen("boot", `> ${keys}`);
-        return;
-      }
+    pane.onSend = (keys) => {
       if (keys !== "Enter") return;
       enters += 1;
       if (enters === 1) return; // swallowed: the composer keeps the prompt
@@ -196,6 +192,116 @@ describe("runTurn", () => {
     assert.equal(enters, 2, "a repaint that keeps the draft must be submitted again");
   });
 
+  it("waits for the draft to be drawn before it can count as submitted", async () => {
+    // A pane that has not drawn the draft yet has an empty composer, so "the
+    // prompt left the composer" is true from the first capture. One repainting
+    // footer then passed for a submit that never happened: no retry, no clear,
+    // and the draft appeared afterwards and sat there for the next turn.
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, composerScreen("boot"));
+    const sink = collect();
+    let enters = 0;
+    let typed = false;
+    let accepted = false;
+    pane.drawsTyping = false;
+    pane.onSend = (keys, options) => {
+      if (options?.literal) {
+        typed = true; // sent, but not drawn in the composer yet
+        return;
+      }
+      if (keys !== "Enter") return;
+      enters += 1;
+      if (enters === 1) return; // swallowed
+      accepted = true;
+      pane.screen = composerScreen("thinking... ■ Esc", "doing it");
+    };
+    // Chrome churns on every poll while the draft is still to come, which is
+    // what made the old screen-differs check read as an accepted submit.
+    let paints = 0;
+    pane.onCapture = () => {
+      if (!typed || accepted) return;
+      paints += 1;
+      const footer = `thinking ${paints}s · ? for help`;
+      // The draft is still on its way for the first captures, so the composer
+      // reads as empty while the footer repaints: that is what the old
+      // screen-differs check took for an accepted submit.
+      const base = paints >= 3 ? draftScreen("do it") : composerScreen("boot");
+      pane.screen = base.replace("← for history · ? for help", footer);
+    };
+
+    const result = await runTurn({
+      pane,
+      promptText: "do it",
+      config: testConfig(clock, { echoTimeoutMs: 2_000 }),
+      events: sink.events,
+    });
+
+    assert.equal(result.stopReason, "end_turn");
+    assert.equal(enters, 2, "a repaint must not pass for a submit, and the swallowed press is retried");
+    assert.equal(
+      pane.sent.filter((entry) => entry.keys === "BSpace").length,
+      0,
+      "a draft that was submitted must not be cleared",
+    );
+  });
+
+  it("fails the turn when the composer never draws the draft", async () => {
+    // Nothing was typed into the composer, so no submit can be read from it:
+    // pressing Enter into an empty composer would start nothing, and reporting
+    // `end_turn` would be the silent bug this change removes.
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, composerScreen("boot"));
+    const sink = collect();
+    pane.drawsTyping = false;
+    pane.onSend = () => {};
+
+    await assert.rejects(
+      runTurn({ pane, promptText: "do it", config: testConfig(clock), events: sink.events }),
+      /was not typed/,
+    );
+    assert.equal(
+      pane.sent.filter((entry) => entry.keys === "Enter").length,
+      0,
+      "no Enter is pressed into a composer that never held the prompt",
+    );
+    const clears = pane.sent.filter((entry) => entry.keys === "BSpace");
+    assert.equal(clears.length, 1, "the typing is undone in one send");
+    assert.equal(clears[0].options?.repeat, Array.from("do it").length);
+  });
+
+  it("accepts a submit that lands between the last poll and the final capture", async () => {
+    // One capture decides both the submit and the clear, so a press that lands
+    // after the last poll is reported as a turn: failing it would fail a turn
+    // that is running, and a caller that resubmits would start a duplicate.
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, composerScreen("boot"));
+    const sink = collect();
+    let enters = 0;
+    pane.onSend = (keys, options) => {
+      if (options?.literal) {
+        pane.screen = draftScreen(keys);
+        return;
+      }
+      if (keys !== "Enter") return;
+      enters += 1; // every press is swallowed while the loop is running
+    };
+    // The deadline is 150ms of submit delay plus 500ms of budget.
+    pane.onCapture = () => {
+      if (enters > 0 && clock.now() >= 650) {
+        pane.screen = composerScreen("thinking... ■ Esc", "doing it");
+      }
+    };
+
+    const result = await runTurn({ pane, promptText: "do it", config: testConfig(clock), events: sink.events });
+
+    assert.equal(result.stopReason, "end_turn");
+    assert.equal(
+      pane.sent.filter((entry) => entry.keys === "BSpace").length,
+      0,
+      "a submit that landed must not have its turn cleared and failed",
+    );
+  });
+
   it("sends no Enter when the cancel lands during a retry capture", async () => {
     const clock = new FakeClock();
     const pane = new FakePane(meta, composerScreen("boot"));
@@ -207,11 +313,7 @@ describe("runTurn", () => {
       isCancelled: () => cancelled,
     };
     acceptsSubmit(pane);
-    pane.onSend = (keys, options) => {
-      if (options?.literal) {
-        pane.screen = composerScreen("boot", `> ${keys}`);
-        return;
-      }
+    pane.onSend = (keys) => {
       if (keys === "Enter") enters += 1; // swallowed, so a retry is due
     };
     // The cancel arrives while the retry's capture is in flight, at a poll where
@@ -452,11 +554,7 @@ describe("runTurn", () => {
       onNotice: () => {},
       isCancelled: () => cancelled,
     };
-    pane.onSend = (keys, options) => {
-      if (options?.literal) {
-        pane.screen = composerScreen("boot", `> ${keys}`);
-        return;
-      }
+    pane.onSend = (keys) => {
       if (keys === "Enter") {
         // The submit landed and the turn is writing; cancel arrives now, when
         // the prompt is long gone from the composer, so backspaces would delete
@@ -481,11 +579,7 @@ describe("runTurn", () => {
     const pane = new FakePane(meta, composerScreen("boot"));
     const sink = collect();
     const enterTimes: number[] = [];
-    pane.onSend = (keys, options) => {
-      if (options?.literal) {
-        pane.screen = composerScreen("boot", `> ${keys}`);
-        return;
-      }
+    pane.onSend = (keys) => {
       if (keys === "Enter") enterTimes.push(clock.time);
     };
 
@@ -517,11 +611,7 @@ describe("runTurn", () => {
     const sink = collect();
     let enters = 0;
     let reacted = false;
-    pane.onSend = (keys, options) => {
-      if (options?.literal) {
-        pane.screen = composerScreen("boot", `> ${keys}`);
-        return;
-      }
+    pane.onSend = (keys) => {
       if (keys === "Enter") enters += 1; // swallowed until the late reaction below
     };
     clock.onAdvance = (time) => {
@@ -648,6 +738,7 @@ describe("runTurn", () => {
       }
     };
 
+    acceptsSubmit(pane);
     await runTurn({
       pane,
       promptText: "remember the word PLUM\nand keep it",
@@ -673,6 +764,7 @@ describe("runTurn", () => {
       }
     };
 
+    acceptsSubmit(pane);
     const result = await runTurn({
       pane,
       promptText: "remember the word PLUM\nand keep it",
@@ -917,6 +1009,7 @@ describe("echo handling", () => {
       }
     };
 
+    acceptsSubmit(pane);
     await runTurn({ pane, promptText: prompt, config: testConfig(clock), events: sink.events });
 
     const streamed = sink.chunks.join("\n");
@@ -953,6 +1046,7 @@ describe("echo handling", () => {
       }
     };
 
+    acceptsSubmit(pane);
     await runTurn({
       pane,
       promptText: "Review this:\nconst value = 1;",
@@ -986,6 +1080,7 @@ describe("echo handling", () => {
       }
     };
 
+    acceptsSubmit(pane);
     await runTurn({
       pane,
       promptText: "explain the count\nand the exit code",
@@ -1017,6 +1112,7 @@ describe("echo handling", () => {
       }
     };
 
+    acceptsSubmit(pane);
     await runTurn({
       pane,
       promptText: "\nquote the word KIWI",
@@ -1263,9 +1359,15 @@ describe("readiness", () => {
     let counter = 0;
     clock.onAdvance = () => {
       counter += 1;
-      pane.screen = composerScreen("boot").replace("Enter a coding task", `thinking ${counter}s`);
+      // Only the status line moves: the composer keeps the draft, so the turn
+      // still sees its prompt waiting there while the chrome churns.
+      pane.screen = pane.screen.replace(
+        "← for history · ? for help",
+        `thinking ${counter}s · ? for help`,
+      );
     };
 
+    acceptsSubmit(pane);
     const result = await runTurn({ pane, promptText: "hello", config: testConfig(clock), events: sink.events });
 
     assert.equal(result.stopReason, "end_turn");

@@ -196,14 +196,40 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
     await clearDraft(pane, promptText, null);
     return { stopReason: "cancelled", streamedChars };
   }
-  // The composer with the prompt typed, which is the reference a retry compares
-  // against: the TUI reacts to a submit by taking the text out of the composer.
-  const typedScreen = await pane.capture();
-  const typedView = normalizeJoined(typedScreen);
   // What the composer shows of the prompt, which is what a submit takes away.
   // A long prompt is wrapped across rows, so the comparison is collapsed, and
   // only its beginning is needed: the TUI truncates a very long draft.
   const typedNeedle = collapse(promptText).slice(0, PROMPT_NEEDLE_CHARS);
+  const submitDeadline = config.now() + config.echoTimeoutMs;
+  // Acceptance needs the draft to be seen before it can be seen leaving. A pane
+  // that has not drawn the draft yet has an empty composer, so "the composer no
+  // longer holds it" is true from the first capture, and one unrelated repaint
+  // would then pass for a submit that never happened: no retry, no clear, and a
+  // turn reported as ended while the draft appears afterwards and sits there.
+  // So the draft has to be visible before Enter is pressed at all.
+  let draftSeen = false;
+  while (!draftSeen) {
+    if (events.isCancelled()) {
+      await clearDraft(pane, promptText, null);
+      return { stopReason: "cancelled", streamedChars };
+    }
+    const screen = await pane.capture();
+    if (!leftComposer(screen, typedNeedle)) {
+      draftSeen = true;
+      break;
+    }
+    if (config.now() >= submitDeadline) break;
+    await config.sleep(Math.min(config.pollIntervalMs, submitDeadline - config.now()));
+  }
+  if (!draftSeen) {
+    // Nothing was submitted, so nothing can be reported as submitted: the same
+    // quiet `end_turn` bug this change exists to remove, one step earlier.
+    await clearDraft(pane, promptText, null);
+    throw new RequestError(
+      -32000,
+      `the prompt was not typed: the composer never showed it within ${config.echoTimeoutMs}ms`,
+    );
+  }
   if (events.isCancelled()) {
     await clearDraft(pane, promptText, null);
     return { stopReason: "cancelled", streamedChars };
@@ -214,7 +240,6 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
   // unchanged: the TUI reacts the moment the prompt is really submitted.
   let submitted = false;
   let submitAttempts = 1;
-  const submitDeadline = config.now() + config.echoTimeoutMs;
   // Space the presses across the whole budget instead of one per poll: at the
   // poll interval three presses land in the first few hundred milliseconds, so
   // a pane that accepts the first Enter late gets two more and a false "not
@@ -229,7 +254,7 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
     // A cancel can arrive while the capture is in flight; pressing Enter now
     // would start the turn the user just asked to stop.
     if (events.isCancelled()) break;
-    if (normalizeJoined(screen) !== typedView && leftComposer(screen, typedNeedle)) {
+    if (leftComposer(screen, typedNeedle)) {
       submitted = true; // the TUI reacted: the prompt left the composer
       break;
     }
@@ -254,23 +279,19 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
   // would match the prompt in the composer, the screen would then stay still,
   // and the turn would report `end_turn` for work that never started.
   // An Enter pressed just before the last poll can still land after it, so one
-  // more capture decides the turn, on the same terms the loop accepts a submit:
-  // failing it here would report a turn as failed while it runs, and a capture
-  // that shows no reaction at all must not pass for one.
+  // more capture decides the turn. That same capture decides the clear too: a
+  // second one could see the submit land in between and then skip the clear, so
+  // the turn would fail with its own prompt already submitted and running.
+  // Failing here while the submit has landed would report a running turn as a
+  // failed one, and a caller that resubmits would start a duplicate turn.
   if (!submitted) {
     const finalScreen = await pane.capture();
-    if (normalizeJoined(finalScreen) !== typedView && leftComposer(finalScreen, typedNeedle)) {
-      submitted = true;
+    if (!(await clearDraft(pane, promptText, typedNeedle, finalScreen))) {
+      throw new RequestError(
+        -32000,
+        `the prompt was not submitted: the composer did not accept ${SUBMIT_KEY} after ${submitAttempts} attempts`,
+      );
     }
-  }
-  if (!submitted) {
-    // Leaving the draft behind would corrupt the next turn: its prompt would be
-    // typed after it and one Enter would submit both.
-    await clearDraft(pane, promptText, typedNeedle);
-    throw new RequestError(
-      -32000,
-      `the prompt was not submitted: the composer did not accept ${SUBMIT_KEY} after ${submitAttempts} attempts`,
-    );
   }
 
   // Wait for the TUI to echo the prompt into the transcript so it is not
@@ -635,11 +656,6 @@ function collapse(text: string): string {
   return text.replace(/[\s⎘•·△▽✕]/gu, "");
 }
 
-/** A whole screen as one normalized string, for comparing two captures. */
-function normalizeJoined(raw: string): string {
-  return normalizeScreen(raw).join("\n");
-}
-
 /** The composer draws a very long draft truncated, so only its head is matched. */
 const PROMPT_NEEDLE_CHARS = 40;
 
@@ -677,11 +693,15 @@ async function clearDraft(
   pane: PaneSource,
   promptText: string,
   typedNeedle: string | null,
-): Promise<void> {
-  if (typedNeedle !== null && leftComposer(await pane.capture(), typedNeedle)) {
-    return;
-  }
+  screen: string | null = null,
+): Promise<boolean> {
+  const current = screen ?? (await pane.capture());
+  // Returns whether the capture showed the draft already gone, so the caller can
+  // decide a submit on the very read that decided the clear, and so a submit
+  // that landed late is reported as a turn rather than as a failed one.
+  if (typedNeedle !== null && leftComposer(current, typedNeedle)) return true;
   const length = Array.from(promptText).length;
-  if (length === 0) return;
+  if (length === 0) return false;
   await pane.send(CLEAR_KEY, { repeat: length });
+  return false;
 }

@@ -317,12 +317,6 @@ function isDecorationRow(line: string): boolean {
 }
 
 /**
- * Index where the bottom chrome block starts, so `lines.slice(0, start)` is the
- * transcript. Walks up from the input box's top border consuming border rows,
- * status rows, blank padding rows, and whole bordered boxes (the ad box). Stops
- * at the first row that is real content: the transcript itself.
- */
-/**
  * The composer box's top and bottom border rows, or null when the screen has no
  * composer. Only a box holding the prompt glyph is the composer: a box in the
  * transcript (a code block, a table, an answer) is content.
@@ -343,6 +337,12 @@ function composerBox(lines: readonly string[]): { top: number; bottom: number } 
   return null;
 }
 
+/**
+ * Index where the bottom chrome block starts, so `lines.slice(0, start)` is the
+ * transcript. Walks up from the input box's top border consuming border rows,
+ * status rows, blank padding rows, and whole bordered boxes (the ad box). Stops
+ * at the first row that is real content: the transcript itself.
+ */
 function chromeStart(lines: readonly string[]): number {
   // Cutting the transcript at a transcript box's top border would drop
   // everything above it, so the block starts at the composer's box only.

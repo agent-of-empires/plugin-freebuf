@@ -30,26 +30,34 @@ export function composerScreen(...rows: string[]): string {
 }
 
 /**
- * Models the TUI reacting to a submit, which is what tells `runTurn` the prompt
- * left the composer: an unchanged screen after Enter reads as a lost submit, so
- * the press is retried and then the turn fails. The caret is flipped rather than
- * the draft cleared, so the transcript rows a test is watching stay as scripted.
- * Call this after setting `pane.onSend`, since it wraps it.
+ * Models the TUI accepting a submit, which is what tells `runTurn` the prompt
+ * left the composer: the TUI takes the text out of the composer box and starts
+ * the turn. Only the composer's own row is rewritten, so the transcript rows a
+ * test is watching stay exactly as scripted. Call this after setting
+ * `pane.onSend`, since it wraps it.
  */
 export function acceptsSubmit(pane: FakePane): void {
   const inner = pane.onSend;
   pane.onSend = (keys, options) => {
     inner?.(keys, options);
     if (options?.literal || keys !== "Enter") return;
-    // Toggling a character on the last row is enough of a change to read as a
-    // reaction. It is not whitespace, which the normalization drops, and it
-    // touches neither the picker caret nor the footer title, both of which the
-    // bridge parses.
-    const rows = pane.screen.split("\n");
-    const last = rows.length - 1;
-    rows[last] = rows[last].endsWith(".") ? rows[last].slice(0, -1) : `${rows[last]}.`;
-    pane.screen = rows.join("\n");
+    pane.screen = drawDraft(pane.screen, "");
   };
+}
+/**
+ * The screen with `draft` typed into the composer, the way the TUI draws what it
+ * has been sent. The composer row is rewritten in place so the transcript rows
+ * above it, which tests script and assert on, stay exactly as they were.
+ */
+export function drawDraft(screen: string, draft: string): string {
+  const rows = screen.split("\n");
+  const index = rows.findIndex((row) => row.includes("▍"));
+  if (index === -1) return screen;
+  // The text is written whole rather than clipped to the box's width: the
+  // bridge compares the composer against the prompt it typed, and clipping would
+  // drop the tail a long prompt is matched on.
+  rows[index] = `│  ▍${draft}│`;
+  return rows.join("\n");
 }
 
 /**
@@ -123,6 +131,11 @@ export type SentKeys = { keys: string; options?: SendOptions };
 /** A pane backed by a mutable screen string and a recorded send log. */
 export class FakePane implements SessionPane {
   screen: string;
+  /**
+   * Whether a literal send draws the text into the composer, as the TUI does.
+   * Turned off to model a pane that has not painted the draft yet.
+   */
+  drawsTyping = true;
   captures = 0;
   sent: SentKeys[] = [];
   stopped = false;
@@ -146,6 +159,7 @@ export class FakePane implements SessionPane {
 
   send(keys: string, options?: SendOptions): Promise<void> {
     this.sent.push({ keys, options });
+    if (options?.literal && this.drawsTyping) this.screen = drawDraft(this.screen, keys);
     this.onSend?.(keys, options);
     return Promise.resolve();
   }
