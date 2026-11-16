@@ -128,6 +128,79 @@ describe("pane classification", () => {
     expect(classifyPane(cut.join("\n"))).toBe("waiting");
   });
 
+  it("ignores a question dialog the transcript merely quotes", () => {
+    // Only a dialog drawn over the bottom of the pane blocks: prose about the
+    // panel, however close to the composer, is still prose.
+    const quoting = [
+      '  The modal reads "Some questions for you" with a Close ✕ row, so the',
+      "  classifier can match it and report waiting for the session.",
+      "",
+      " working...  9m 21s   ■ Esc",
+      "╭──────────────────────────────────────╮",
+      "│  ▍Add to the current task            │",
+      "╰──────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(quoting)).toBe("running");
+    expect(classifyPane(quoting.replace(" working...  9m 21s   ■ Esc\n", ""))).toBe("idle");
+  });
+
+  it("ignores a question quoted inside a transcript panel", () => {
+    // Tool output draws boxes too: a captioned panel without the modal's close
+    // row under its top border is transcript, not a dialog.
+    const panel = [
+      "  ╭─────── Some questions for you ───────╮",
+      "  │ the modal, as captured by an earlier run │",
+      "  ╰─────────────────────────────────────────╯",
+      " working...  1m 31s   ■ Esc",
+      "╭───────────────────────────────────╮",
+      "│  ▍Add to the current task         │",
+      "╰───────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(panel)).toBe("running");
+  });
+
+  it("reads a tall question dialog as waiting", () => {
+    // The caption sits on the top border with Close under it, so a dialog taller
+    // than the pane's footer still counts, however many rows it holds.
+    const tall = [
+      "╭────────────── Some questions for you ──────────────╮",
+      "│                                          Close ✕ │",
+      ...Array.from({ length: 24 }, (_, i) => `│ ▼ question ${i + 1}${' '.repeat(50)}│`),
+      "╰──────────────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(tall)).toBe("waiting");
+  });
+
+  it("never takes a confirmation phrase in the transcript for a block", () => {
+    // Only a dialog's caption counts: prose, a quoted prompt or tool output can
+    // say "(y/n)" or "Do you want to proceed" without anything being asked.
+    const asking = [
+      "  To continue, the tool would have prompted (y/n) -- it did not, so it just ran.",
+      '  The harness asked "Do you want to proceed?" and the answer was yes.',
+      "",
+      " working...  2m 04s   ■ Esc",
+      "╭───────────────────────────────────────────────────────╮",
+      "│  ▍Add to the current task (/ for commands)            │",
+      "╰───────────────────────────────────────────────────────╯",
+      " ← for history · ? for help",
+    ].join("\n");
+    expect(classifyPane(asking)).toBe("running");
+    expect(classifyPane(asking.replace(" working...  2m 04s   ■ Esc\n", ""))).toBe("idle");
+  });
+
+  it("reads a question dialog whose body mentions clicking Close", () => {
+    // A body row can carry the close words too; only a caption over the row
+    // opens a dialog, so the scan keeps looking rather than giving up.
+    const mentioning = [
+      "╭────────────── Some questions for you ──────────────╮",
+      "│                                          Close ✕ │",
+      "│ ▼ How should the dialog be dismissed?            │",
+      "│   Click Close ✕ in the top right, or press Esc    │",
+      "╰──────────────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(mentioning)).toBe("waiting");
+  });
+
   it("prefers a dialog over the working line it was drawn across", () => {
     expect(classifyPane(`${RUNNING_PANE}\n${WAITING_PANE}`)).toBe("waiting");
   });
