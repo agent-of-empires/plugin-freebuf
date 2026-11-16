@@ -37,12 +37,19 @@ capabilities = ["runtime.worker", "session.read", "fs.read", "fs.write", "proces
 # host read the worker's AgentIntegrationSnapshot as the row's own status.
 # `provider_versions` is a list of semver requirements for the provider runtime
 # that writes those reports (freebuff --version); `resume_arg` no longer exists
-# in this schema. `replies` is omitted (false): a status-only adapter does not
-# own the prompt, so the host discards any prompt the report might carry.
+# in this schema.
+#
+# `replies = true` opts into provider-native quick responses: when the report
+# carries the question Freebuff is blocked on, the user answers it from the
+# session list and the host writes the answer to the plugin's reply sidecar,
+# which the worker turns into the dialog's own keypresses (src/replies.ts,
+# src/tmux.ts). The host sends a declared reply key into the pane to wake the
+# provider; the worker polls the sidecar instead, so the key stays inert.
 [[agent_integrations]]
 tool = "freebuff"
 provider_versions = [">=0.2.36, <1.0.0"]
 command = "freebuff"
+replies = true
 
 # Commands the plugin contributes (palette / CLI), namespaced by the host as
 # plugin.agent-of-empires.aoe-freebuf.<id>. The command-id -> worker RPC mapping

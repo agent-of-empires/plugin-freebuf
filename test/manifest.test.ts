@@ -123,14 +123,15 @@ describe("aoe-plugin.toml", () => {
     expect(manifest.root.api_version).toBe(19);
   });
 
-  it("declares the freebuff integration the worker publishes status for", () => {
+  it("declares the freebuff integration the worker publishes status and replies for", () => {
     const integrations = manifest.sections.agent_integrations ?? [];
     expect(integrations).toHaveLength(1);
     expect(integrations[0].tool).toBe("freebuff");
     expect(integrations[0].command).toBe("freebuff");
     expect(integrations[0].provider_versions).toEqual([">=0.2.36, <1.0.0"]);
-    // Status only: claiming replies would need an in-process prompt hook.
-    expect(integrations[0].replies).toBeUndefined();
+    // Quick responses: the worker publishes the dialog's prompt and applies the
+    // host's answer with the dialog's own keypresses, so it owns replies.
+    expect(integrations[0].replies).toBe(true);
   });
 
   it("pins the host line that parses this schema", () => {
