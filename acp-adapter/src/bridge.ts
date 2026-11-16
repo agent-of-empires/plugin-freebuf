@@ -200,7 +200,11 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
   // A long prompt is wrapped across rows, so the comparison is collapsed, and
   // only its beginning is needed: the TUI truncates a very long draft.
   const typedNeedle = collapse(promptText).slice(0, PROMPT_NEEDLE_CHARS);
-  const submitDeadline = config.now() + config.echoTimeoutMs;
+  // The draft gets a budget of its own, and the submit's budget starts at the
+  // first press: one shared window would leave a turn whose draft was drawn late
+  // with less than a retry interval, so a swallowed Enter would fail it although
+  // another press could still have landed.
+  const draftDeadline = config.now() + config.echoTimeoutMs;
   // Acceptance needs the draft to be seen before it can be seen leaving. A pane
   // that has not drawn the draft yet has an empty composer, so "the composer no
   // longer holds it" is true from the first capture, and one unrelated repaint
@@ -218,8 +222,8 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
       draftSeen = true;
       break;
     }
-    if (config.now() >= submitDeadline) break;
-    await config.sleep(Math.min(config.pollIntervalMs, submitDeadline - config.now()));
+    if (config.now() >= draftDeadline) break;
+    await config.sleep(Math.min(config.pollIntervalMs, draftDeadline - config.now()));
   }
   if (!draftSeen) {
     // Nothing was submitted, so nothing can be reported as submitted: the same
@@ -234,6 +238,7 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
     await clearDraft(pane, promptText, null);
     return { stopReason: "cancelled", streamedChars };
   }
+  const submitDeadline = config.now() + config.echoTimeoutMs;
   await pane.send(SUBMIT_KEY);
 
   // A submit can still be lost, so press Enter again while the screen is
@@ -404,8 +409,10 @@ export async function runTurn(request: RunTurnRequest): Promise<TurnResult> {
   let permissionNoticed = false;
 
   while (config.now() < deadline) {
+    // The submit is confirmed by now, so the composer no longer holds this
+    // turn's prompt: anything typed into it belongs to the user's next draft, and
+    // clearing on that needle would delete it.
     if (events.isCancelled()) {
-      await clearDraft(pane, promptText, typedNeedle);
       return { stopReason: "cancelled", streamedChars };
     }
 

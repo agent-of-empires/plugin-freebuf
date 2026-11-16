@@ -269,6 +269,50 @@ describe("runTurn", () => {
     assert.equal(clears[0].options?.repeat, Array.from("do it").length);
   });
 
+  it("does not spend the submit budget waiting for a late draft", async () => {
+    // The draft wait and the submit retries shared one deadline, so a draft drawn
+    // late in that window left the retries less than one interval: the swallowed
+    // first Enter was never retried and the turn failed with a retry still owed.
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, composerScreen("boot"));
+    const sink = collect();
+    let typed = false;
+    let accepted = false;
+    let paints = 0;
+    let enters = 0;
+    pane.drawsTyping = false;
+    pane.onSend = (keys, options) => {
+      if (options?.literal) {
+        typed = true; // sent, but drawn only towards the end of the draft budget
+        return;
+      }
+      if (keys !== "Enter") return;
+      enters += 1;
+      if (enters === 1) return; // swallowed
+      accepted = true;
+      pane.screen = composerScreen("thinking... ■ Esc", "doing it");
+    };
+    pane.onCapture = () => {
+      if (!typed || accepted) return;
+      paints += 1;
+      if (paints >= 15) pane.screen = draftScreen("do it");
+    };
+
+    const result = await runTurn({
+      pane,
+      promptText: "do it",
+      config: testConfig(clock, { echoTimeoutMs: 2_000 }),
+      events: sink.events,
+    });
+
+    assert.equal(result.stopReason, "end_turn");
+    assert.equal(
+      enters,
+      2,
+      "a draft drawn late in its own budget still leaves room to retry the press",
+    );
+  });
+
   it("accepts a submit that lands between the last poll and the final capture", async () => {
     // One capture decides both the submit and the clear, so a press that lands
     // after the last poll is reported as a turn: failing it would fail a turn
@@ -571,6 +615,51 @@ describe("runTurn", () => {
       pane.sent.filter((entry) => entry.keys === "BSpace").length,
       0,
       "a submitted prompt is no longer in the composer to clear",
+    );
+  });
+
+  it("leaves a newer draft alone when the turn is cancelled after the submit", async () => {
+    // Once the submit is confirmed the composer belongs to the user, and the next
+    // draft can begin with the same words this turn sent: backspacing on that
+    // needle deletes text the turn never typed.
+    const working = (composer: string, answer: string[]) =>
+      [
+        "   go",
+        "",
+        ...answer,
+        " 24.8K (19%)   ✕ End session",
+        "╭──────────────────╮",
+        composer,
+        "╰──────────────────╯",
+        " DeepSeek V4.1 Flash Slow · /tmp · Chat: chat",
+      ].join("\n");
+    const clock = new FakeClock();
+    const pane = new FakePane(meta, READY_SCREEN);
+    const sink = collect();
+    let cancelled = false;
+    sink.events.isCancelled = () => cancelled;
+    pane.onSend = (keys) => {
+      if (keys === "Enter") pane.screen = working("│  ▍Add a task     │", ["  the first part"]);
+    };
+    clock.onAdvance = (time) => {
+      if (time < 1_200 || cancelled) return;
+      // The user started the next draft while the turn was still writing.
+      pane.screen = working("│  ▍go next        │", ["  the first part"]);
+      cancelled = true;
+    };
+
+    const result = await runTurn({
+      pane,
+      promptText: "go",
+      config: testConfig(clock, { quiescenceMs: 2_000 }),
+      events: sink.events,
+    });
+
+    assert.equal(result.stopReason, "cancelled");
+    assert.equal(
+      pane.sent.filter((entry) => entry.keys === "BSpace").length,
+      0,
+      "the user's next draft must not be backspaced away",
     );
   });
 
