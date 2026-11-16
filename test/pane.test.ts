@@ -193,6 +193,19 @@ describe("pane classification", () => {
     expect(classifyPane(quoted)).toBe("idle");
   });
 
+  it("reads a prompt above a live turn status line as running, not waiting", () => {
+    // The status line separates the prompt from the composer: the turn is still
+    // going, so the question is not the thing the session is blocked on.
+    const live = [
+      "Do you want to proceed? (y/n)",
+      " working...  1m 31s   ■ Esc",
+      "╭──────────────────────────────────────────╮",
+      "│  ▍Add to the current task                │",
+      "╰──────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(live)).toBe("running");
+  });
+
   it("strips colour codes before matching", () => {
     expect(stripAnsi("\u001b[1m\u001b[32mworking...\u001b[0m  ■ Esc")).toBe("working...  ■ Esc");
     expect(classifyPane("\u001b[2m working...   10s   ■ Esc\u001b[0m\n ❯ Add to the current task")).toBe("running");
