@@ -38,6 +38,7 @@ The format follows [Conventional Commits](https://www.conventionalcommits.org/).
 ### Removed
 
 - The `row-column` slot and its `ui.state.set` pushes, and `src/integration.ts` with its `AgentIntegrationSnapshot` writer. The api_version-19 route is the one that sets a row's own status, but released hosts reject the manifest that declares it.
+- The experimental `acp-adapter/` package and the CI job that tested it. It drove the Freebuff TUI through a tmux pane, which the Freebuff terms of service do not allow. Nothing in the plugin's shipped surface depended on it.
 
 ### Not included
 
