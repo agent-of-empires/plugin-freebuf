@@ -201,15 +201,15 @@ version is never bumped or tagged by hand:
    `package.json`, `package-lock.json` and the manifest's `version`, and writes
    this version's `CHANGELOG.md` section from those subjects.
 3. Merging that PR creates the `vX.Y.Z` tag and a GitHub Release whose body is
-   that version's changelog section. `release.yml` then re-runs the checks,
-   refuses a tag that disagrees with either version field, and attaches the
-   source archive and its `sha256` to the release.
+   that version's changelog section, and the same run calls `release.yml` to
+   re-run the checks, refuse a tag that disagrees with either version field, and
+   attach the source archive and its `sha256`.
 
-The release has to be created by something other than `GITHUB_TOKEN` to start
-its own publish run, so configure a `RELEASE_TOKEN` secret (a PAT with
-`contents: write` and `pull-requests: write`). Without it the PR, tag and
-release are still created without the archive; run the publish step by hand
-with `gh workflow run release.yml -f tag=vX.Y.Z`.
+No personal access token or secret is required: the release is created with
+`GITHUB_TOKEN`, and `release.yml` is invoked as a reusable workflow rather than
+by an event, which is the one way to keep an action's own token doing the work
+(`GITHUB_TOKEN` cannot start a separate workflow run). To publish a version cut
+by hand, use `gh workflow run release.yml -f tag=vX.Y.Z`.
 
 To get listed in the Agent of Empires featured index, see the authoring guide's
 publishing section.

@@ -4,13 +4,15 @@ name: Release Please
 # `chore(release): X.Y.Z` PR that bumps the version in package.json,
 # package-lock.json and aoe-plugin.toml and writes CHANGELOG.md from the commit
 # subjects. Merging that PR creates the `vX.Y.Z` tag and a GitHub Release whose
-# notes are that changelog section; release.yml then attaches the source archive
-# to it. Config: release-please-config.json, .release-please-manifest.json.
+# notes are that changelog section, and the publish job below calls release.yml
+# to attach the source archive to it. Config: release-please-config.json,
+# .release-please-manifest.json.
 #
-# RELEASE_TOKEN is required for the release to start release.yml: events caused
-# by GITHUB_TOKEN start no workflows. Without it the PR, tag and release are
-# still made without the archive -- attach it by hand with
-# `gh workflow run release.yml -f tag=vX.Y.Z`.
+# No PAT is needed. A release created with GITHUB_TOKEN would not start a
+# separate `release: published` workflow, so release.yml is called as a reusable
+# workflow inside this run instead -- the same token may do the work directly,
+# it just cannot trigger a new run. Without any release (a push to main that
+# only refreshed the PR) the publish job is skipped.
 
 on:
   push:
@@ -32,13 +34,13 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       - id: release
         uses: googleapis/release-please-action@v4
         with:
-          # A PAT (or GitHub App token) with contents: write and
-          # pull-requests: write, so the tag it pushes starts release.yml.
-          token: ${{ secrets.RELEASE_TOKEN || github.token }}
           target-branch: main
 
       # `pr` is a JSON object carrying the release PR's title and body. Passed
@@ -53,3 +55,15 @@ jobs:
         run: |
           printf 'released=%s\ntag=%s\npr=%s\n' \
             "${RELEASE_CREATED:-}" "${RELEASE_TAG:-}" "${RELEASE_PR:-}"
+
+  # Runs only when the step above actually cut a release, and reuses the same
+  # file a by-hand publish uses (`gh workflow run release.yml -f tag=vX.Y.Z`).
+  publish:
+    name: Publish ${{ needs.release-please.outputs.tag_name }}
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}

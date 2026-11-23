@@ -7,13 +7,19 @@ name: Release
 # fields, and attaches a source archive and its sha256 to that release. Agent of
 # Empires installs the plugin from the archive (or from source).
 #
-# workflow_dispatch is the manual fallback: for a release created with
-# GITHUB_TOKEN, which starts no workflows, or for a version cut by hand before
-# release-please was adopted. It creates the release when there is none yet.
+# It runs two ways. `workflow_call` is how release-please.yml reaches it on the
+# run that created the release: a release created with GITHUB_TOKEN starts no
+# `published` workflow, and calling a reusable workflow is not an event, so no
+# PAT is involved. `workflow_dispatch` publishes a version cut by hand before
+# release-please was adopted, creating the release when there is none yet.
 
 on:
-  release:
-    types: [published]
+  workflow_call:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.2)"
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       tag:
@@ -24,8 +30,8 @@ permissions:
   contents: read
 
 env:
-  # One rule for "which tag do we operate on", so checkout and publishing agree.
-  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.event.release.tag_name }}
+  # `inputs` covers both entry points, so checkout and publishing agree.
+  RELEASE_TAG: ${{ inputs.tag }}
 
 jobs:
   release:
