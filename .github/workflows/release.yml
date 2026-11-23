@@ -1,20 +1,42 @@
 name: Release
 
-# Tag vX.Y.Z to publish a GitHub Release with a source archive and its sha256.
-# Agent of Empires can install the plugin from the archive (or from source).
+# A `vX.Y.Z` tag is created by merging the release-please PR (release-please.yml),
+# which has already bumped package.json, package-lock.json and aoe-plugin.toml and
+# written this version's CHANGELOG.md section. This workflow re-runs the checks,
+# refuses a tag that disagrees with those version fields, and publishes a GitHub
+# Release carrying that changelog section plus a source archive and its sha256.
+# Agent of Empires installs the plugin from the archive (or from source).
+#
+# workflow_dispatch is the manual fallback for a tag pushed with GITHUB_TOKEN,
+# which starts no workflows.
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.2)"
+        required: true
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  # One rule for "which ref do we operate on", so checkout and the tag agree.
+  RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_REF }}
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -22,19 +44,49 @@ jobs:
       - run: npm install
       - run: npm run lint && npm run build && npm test
 
+      - name: Validate version matches tag
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${RELEASE_TAG#v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          MANIFEST_VERSION="$(python3 -c 'import sys,tomllib; print(tomllib.load(open("aoe-plugin.toml","rb"))["version"])')"
+          echo "tag:            $TAG_VERSION"
+          echo "package.json:   $PKG_VERSION"
+          echo "aoe-plugin.toml: $MANIFEST_VERSION"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ] || [ "$MANIFEST_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Tag $RELEASE_TAG disagrees with package.json ($PKG_VERSION) or aoe-plugin.toml ($MANIFEST_VERSION)."
+            echo "Tags come from merging the release-please PR, which bumps both fields first."
+            exit 1
+          fi
+
       - name: Build source archive
         run: |
-          TAG=${{ github.ref_name }}
-          NAME=aoe-freebuf-${TAG}
+          set -euo pipefail
+          NAME="aoe-freebuf-${RELEASE_TAG}"
           git archive --format=tar.gz --prefix="${NAME}/" -o "${NAME}.tar.gz" HEAD
           sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256"
+          cat "${NAME}.tar.gz.sha256"
+
+      - name: Extract release notes
+        run: |
+          set -euo pipefail
+          # The release PR wrote this version's section into CHANGELOG.md.
+          awk -v heading="## [${RELEASE_TAG#v}]" '
+            index($0, "## [") == 1 { if (found) exit; found = index($0, heading) == 1; next }
+            found
+          ' CHANGELOG.md > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "No user-facing changes." > release-notes.md
+          fi
+          cat release-notes.md
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG=${{ github.ref_name }}
-          NAME=aoe-freebuf-${TAG}
-          gh release create "${TAG}" \
-            --title "${TAG}" \
-            --generate-notes \
+          set -euo pipefail
+          NAME="aoe-freebuf-${RELEASE_TAG}"
+          gh release create "${RELEASE_TAG}" \
+            --title "${RELEASE_TAG}" \
+            --notes-file release-notes.md \
             "${NAME}.tar.gz" "${NAME}.tar.gz.sha256"

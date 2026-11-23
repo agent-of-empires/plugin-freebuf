@@ -1,0 +1,47 @@
+name: Release Please
+
+# Mirrors the core repo's release-plz flow. Every push to main refreshes one
+# `chore(release): X.Y.Z` PR that bumps the version in package.json,
+# package-lock.json and aoe-plugin.toml and writes CHANGELOG.md from the commit
+# subjects. Merging that PR tags `vX.Y.Z` (this workflow does not create the
+# GitHub release); release.yml publishes it from the tag. Config:
+# release-please-config.json, .release-please-manifest.json.
+#
+# RELEASE_TOKEN is required for the tag to start release.yml: a push made with
+# GITHUB_TOKEN starts no workflows. Without it the PR and tag are still made --
+# run the release by hand with `gh workflow run release.yml -f tag=vX.Y.Z`.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never cancel: a cancelled run can leave the release PR half-updated.
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Update release PR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          # A PAT (or GitHub App token) with contents: write and
+          # pull-requests: write, so the tag it pushes starts release.yml.
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+          target-branch: main
+
+      - name: Report
+        run: |
+          echo "released=${{ steps.release.outputs.release_created }}" \
+               "tag=${{ steps.release.outputs.tag_name }}" \
+               "pr=${{ steps.release.outputs.pr }}"

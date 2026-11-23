@@ -191,10 +191,27 @@ and the [plugin API reference](https://agent-of-empires.com/docs/plugin-api/).
 
 ## Release
 
-Push a `v0.1.0`-style tag to run the release workflow: it
-runs checks, generates the changelog from conventional commits, and publishes a
-GitHub Release with a source archive and `sha256`. To get listed in the Agent of
-Empires featured index, see the authoring guide's publishing section.
+Releases are automated with
+[release-please](https://github.com/googleapis/release-please) -- the npm-side
+counterpart of the release-plz flow the Agent of Empires core repo uses -- so a
+version is never bumped or tagged by hand:
+
+1. Merge to `main` with a Conventional Commit subject (`feat:`, `fix:`, ...).
+2. `release-please.yml` keeps one `chore(release): X.Y.Z` PR open that bumps
+   `package.json`, `package-lock.json` and the manifest's `version`, and writes
+   this version's `CHANGELOG.md` section from those subjects.
+3. Merging that PR tags `vX.Y.Z`. `release.yml` then re-runs the checks, refuses
+   a tag that disagrees with either version field, and publishes a GitHub
+   Release whose body is that version's changelog section, with the source
+   archive and its `sha256`.
+
+The tag has to be pushed by something other than `GITHUB_TOKEN` to start its own
+release run, so configure a `RELEASE_TOKEN` secret (a PAT with `contents: write`
+and `pull-requests: write`). Without it the PR and tag are still created; run
+the publish step by hand with `gh workflow run release.yml -f tag=vX.Y.Z`.
+
+To get listed in the Agent of Empires featured index, see the authoring guide's
+publishing section.
 
 ## License
 
