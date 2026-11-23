@@ -1,18 +1,19 @@
 name: Release
 
-# A `vX.Y.Z` tag is created by merging the release-please PR (release-please.yml),
-# which has already bumped package.json, package-lock.json and aoe-plugin.toml and
-# written this version's CHANGELOG.md section. This workflow re-runs the checks,
-# refuses a tag that disagrees with those version fields, and publishes a GitHub
-# Release carrying that changelog section plus a source archive and its sha256.
-# Agent of Empires installs the plugin from the archive (or from source).
+# Merging the release-please PR (release-please.yml) creates the `vX.Y.Z` tag and
+# a GitHub Release whose notes are that version's CHANGELOG.md section, having
+# already bumped package.json, package-lock.json and aoe-plugin.toml. This
+# workflow re-runs the checks, refuses a tag that disagrees with those version
+# fields, and attaches a source archive and its sha256 to that release. Agent of
+# Empires installs the plugin from the archive (or from source).
 #
-# workflow_dispatch is the manual fallback for a tag pushed with GITHUB_TOKEN,
-# which starts no workflows.
+# workflow_dispatch is the manual fallback: for a release created with
+# GITHUB_TOKEN, which starts no workflows, or for a version cut by hand before
+# release-please was adopted. It creates the release when there is none yet.
 
 on:
-  push:
-    tags: ["v*"]
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       tag:
@@ -23,9 +24,8 @@ permissions:
   contents: read
 
 env:
-  # One rule for "which ref do we operate on", so checkout and the tag agree.
-  RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
-  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+  # One rule for "which tag do we operate on", so checkout and publishing agree.
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.event.release.tag_name }}
 
 jobs:
   release:
@@ -35,7 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.RELEASE_REF }}
+          ref: ${{ env.RELEASE_TAG }}
           persist-credentials: false
 
       - uses: actions/setup-node@v4
@@ -80,13 +80,20 @@ jobs:
           fi
           cat release-notes.md
 
-      - name: Publish release
+      - name: Attach the archive
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           NAME="aoe-freebuf-${RELEASE_TAG}"
-          gh release create "${RELEASE_TAG}" \
-            --title "${RELEASE_TAG}" \
-            --notes-file release-notes.md \
-            "${NAME}.tar.gz" "${NAME}.tar.gz.sha256"
+          # release-please already created this release; only a hand-cut tag from
+          # the dispatch fallback still needs one.
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" \
+              "${NAME}.tar.gz" "${NAME}.tar.gz.sha256" --clobber
+          else
+            gh release create "${RELEASE_TAG}" \
+              --title "${RELEASE_TAG}" \
+              --notes-file release-notes.md \
+              "${NAME}.tar.gz" "${NAME}.tar.gz.sha256"
+          fi

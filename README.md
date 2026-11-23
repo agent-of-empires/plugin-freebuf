@@ -200,15 +200,16 @@ version is never bumped or tagged by hand:
 2. `release-please.yml` keeps one `chore(release): X.Y.Z` PR open that bumps
    `package.json`, `package-lock.json` and the manifest's `version`, and writes
    this version's `CHANGELOG.md` section from those subjects.
-3. Merging that PR tags `vX.Y.Z`. `release.yml` then re-runs the checks, refuses
-   a tag that disagrees with either version field, and publishes a GitHub
-   Release whose body is that version's changelog section, with the source
-   archive and its `sha256`.
+3. Merging that PR creates the `vX.Y.Z` tag and a GitHub Release whose body is
+   that version's changelog section. `release.yml` then re-runs the checks,
+   refuses a tag that disagrees with either version field, and attaches the
+   source archive and its `sha256` to the release.
 
-The tag has to be pushed by something other than `GITHUB_TOKEN` to start its own
-release run, so configure a `RELEASE_TOKEN` secret (a PAT with `contents: write`
-and `pull-requests: write`). Without it the PR and tag are still created; run
-the publish step by hand with `gh workflow run release.yml -f tag=vX.Y.Z`.
+The release has to be created by something other than `GITHUB_TOKEN` to start
+its own publish run, so configure a `RELEASE_TOKEN` secret (a PAT with
+`contents: write` and `pull-requests: write`). Without it the PR, tag and
+release are still created without the archive; run the publish step by hand
+with `gh workflow run release.yml -f tag=vX.Y.Z`.
 
 To get listed in the Agent of Empires featured index, see the authoring guide's
 publishing section.

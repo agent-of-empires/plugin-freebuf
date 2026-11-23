@@ -3,13 +3,14 @@ name: Release Please
 # Mirrors the core repo's release-plz flow. Every push to main refreshes one
 # `chore(release): X.Y.Z` PR that bumps the version in package.json,
 # package-lock.json and aoe-plugin.toml and writes CHANGELOG.md from the commit
-# subjects. Merging that PR tags `vX.Y.Z` (this workflow does not create the
-# GitHub release); release.yml publishes it from the tag. Config:
-# release-please-config.json, .release-please-manifest.json.
+# subjects. Merging that PR creates the `vX.Y.Z` tag and a GitHub Release whose
+# notes are that changelog section; release.yml then attaches the source archive
+# to it. Config: release-please-config.json, .release-please-manifest.json.
 #
-# RELEASE_TOKEN is required for the tag to start release.yml: a push made with
-# GITHUB_TOKEN starts no workflows. Without it the PR and tag are still made --
-# run the release by hand with `gh workflow run release.yml -f tag=vX.Y.Z`.
+# RELEASE_TOKEN is required for the release to start release.yml: events caused
+# by GITHUB_TOKEN start no workflows. Without it the PR, tag and release are
+# still made without the archive -- attach it by hand with
+# `gh workflow run release.yml -f tag=vX.Y.Z`.
 
 on:
   push:
@@ -40,8 +41,15 @@ jobs:
           token: ${{ secrets.RELEASE_TOKEN || github.token }}
           target-branch: main
 
+      # `pr` is a JSON object carrying the release PR's title and body. Passed
+      # through the environment it is data, not shell syntax: interpolated into
+      # the script instead, the quotes in `chore(release): X.Y.Z` end the shell
+      # string and the parentheses fail the step after the PR was updated.
       - name: Report
+        env:
+          RELEASE_CREATED: ${{ steps.release.outputs.release_created }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
+          RELEASE_PR: ${{ steps.release.outputs.pr }}
         run: |
-          echo "released=${{ steps.release.outputs.release_created }}" \
-               "tag=${{ steps.release.outputs.tag_name }}" \
-               "pr=${{ steps.release.outputs.pr }}"
+          printf 'released=%s\ntag=%s\npr=%s\n' \
+            "${RELEASE_CREATED:-}" "${RELEASE_TAG:-}" "${RELEASE_PR:-}"
