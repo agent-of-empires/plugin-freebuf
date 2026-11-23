@@ -26,8 +26,8 @@ is still open. It is found structurally, and only its *caption* decides: a
 boxed panel with `Close ✕` under its captioned border, with no composer drawn
 below it (a dialog replaces the composer; output the session printed does not).
 So a session that merely talks about, quotes, or prints a dialog stays
-`running`/`idle` -- a dialog the session quotes or prints is not read as one --
-and a question is never reported as an error. A confirmation asked outside a
+`running`/`idle`, because a dialog the session quotes or prints is not read as
+one, and a question is never reported as an error. A confirmation asked outside a
 dialog, like `(y/n)`, or the modal Freebuff draws once the account is over its
 concurrent-session limit, counts only in the rows just above the composer,
 where the question is put to the user; the same modal drawn as a box with
@@ -59,7 +59,7 @@ the row's status and to expose Freebuff in `aoe agents`, the agent picker, and
 
 That schema version is also the install floor. The host parses manifests
 strictly and rejects one whose schema version it does not know, so
-`aoe_version` is `>=1.21.0, <2.0.0` -- the host line that parses this contract.
+`aoe_version` is `>=1.21.0, <2.0.0`, the host line that parses this contract.
 `src/integration.ts` writes the report from the same pane classification as the
 attention flag, every tick; the attention flag still works on its own, so a
 session stays visible in the attention order either way.
@@ -192,8 +192,8 @@ and the [plugin API reference](https://agent-of-empires.com/docs/plugin-api/).
 ## Release
 
 Releases are automated with
-[release-please](https://github.com/googleapis/release-please) -- the npm-side
-counterpart of the release-plz flow the Agent of Empires core repo uses -- so a
+[release-please](https://github.com/googleapis/release-please), the npm-side
+counterpart of the release-plz flow the Agent of Empires core repo uses, so a
 version is never bumped or tagged by hand:
 
 1. Merge to `main` with a Conventional Commit subject (`feat:`, `fix:`, ...).

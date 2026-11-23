@@ -7,8 +7,8 @@ The format follows [Conventional Commits](https://www.conventionalcommits.org/).
 ## [0.1.2](https://github.com/agent-of-empires/plugin-freebuf/releases/tag/v0.1.2) (2026-11-17)
 
 0.1.0 through 0.1.2 shipped without per-version entries. This section records
-what 0.1.2 contains -- the version the Agent of Empires featured index pins --
-and later versions are written by release-please from the merged commit
+what 0.1.2 contains, which is the version the Agent of Empires featured index
+pins; later versions are written by release-please from the merged commit
 subjects.
 
 ### Added

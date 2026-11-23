@@ -8,11 +8,16 @@ name: Release Please
 # to attach the source archive to it. Config: release-please-config.json,
 # .release-please-manifest.json.
 #
-# No PAT is needed. A release created with GITHUB_TOKEN would not start a
+# Publishing needs no PAT: a release created with GITHUB_TOKEN cannot start a
 # separate `release: published` workflow, so release.yml is called as a reusable
-# workflow inside this run instead -- the same token may do the work directly,
-# it just cannot trigger a new run. Without any release (a push to main that
-# only refreshed the PR) the publish job is skipped.
+# workflow inside this run instead. The same token does the work directly, it
+# just cannot trigger a new run. Without any release (a push to main that only
+# refreshed the PR) the publish job is skipped.
+#
+# The release PR still needs a human step. GitHub does not start `pull_request`
+# workflows for a PR opened with GITHUB_TOKEN, so `checks.yml` never reports on
+# it: close and reopen the release PR to run the required checks, or let an
+# admin merge past them.
 
 on:
   push:
