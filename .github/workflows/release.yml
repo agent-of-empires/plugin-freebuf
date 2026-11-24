@@ -1,20 +1,48 @@
 name: Release
 
-# Tag vX.Y.Z to publish a GitHub Release with a source archive and its sha256.
-# Agent of Empires can install the plugin from the archive (or from source).
+# Merging the release-please PR (release-please.yml) creates the `vX.Y.Z` tag and
+# a GitHub Release whose notes are that version's CHANGELOG.md section, having
+# already bumped package.json, package-lock.json and aoe-plugin.toml. This
+# workflow re-runs the checks, refuses a tag that disagrees with those version
+# fields, and attaches a source archive and its sha256 to that release. Agent of
+# Empires installs the plugin from the archive (or from source).
+#
+# It runs two ways. `workflow_call` is how release-please.yml reaches it on the
+# run that created the release: a release created with GITHUB_TOKEN starts no
+# `published` workflow, and calling a reusable workflow is not an event, so no
+# PAT is involved. `workflow_dispatch` publishes a version cut by hand before
+# release-please was adopted, creating the release when there is none yet.
 
 on:
-  push:
-    tags: ["v*"]
+  workflow_call:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.2)"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.2)"
+        required: true
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  # `inputs` covers both entry points, so checkout and publishing agree.
+  RELEASE_TAG: ${{ inputs.tag }}
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -22,19 +50,56 @@ jobs:
       - run: npm install
       - run: npm run lint && npm run build && npm test
 
+      - name: Validate version matches tag
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${RELEASE_TAG#v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          MANIFEST_VERSION="$(python3 -c 'import sys,tomllib; print(tomllib.load(open("aoe-plugin.toml","rb"))["version"])')"
+          echo "tag:            $TAG_VERSION"
+          echo "package.json:   $PKG_VERSION"
+          echo "aoe-plugin.toml: $MANIFEST_VERSION"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ] || [ "$MANIFEST_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Tag $RELEASE_TAG disagrees with package.json ($PKG_VERSION) or aoe-plugin.toml ($MANIFEST_VERSION)."
+            echo "Tags come from merging the release-please PR, which bumps both fields first."
+            exit 1
+          fi
+
       - name: Build source archive
         run: |
-          TAG=${{ github.ref_name }}
-          NAME=aoe-freebuf-${TAG}
+          set -euo pipefail
+          NAME="aoe-freebuf-${RELEASE_TAG}"
           git archive --format=tar.gz --prefix="${NAME}/" -o "${NAME}.tar.gz" HEAD
           sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256"
-      - name: Publish release
+          cat "${NAME}.tar.gz.sha256"
+
+      - name: Extract release notes
+        run: |
+          set -euo pipefail
+          # The release PR wrote this version's section into CHANGELOG.md.
+          awk -v heading="## [${RELEASE_TAG#v}]" '
+            index($0, "## [") == 1 { if (found) exit; found = index($0, heading) == 1; next }
+            found
+          ' CHANGELOG.md > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "No user-facing changes." > release-notes.md
+          fi
+          cat release-notes.md
+
+      - name: Attach the archive
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG=${{ github.ref_name }}
-          NAME=aoe-freebuf-${TAG}
-          gh release create "${TAG}" \
-            --title "${TAG}" \
-            --generate-notes \
-            "${NAME}.tar.gz" "${NAME}.tar.gz.sha256"
+          set -euo pipefail
+          NAME="aoe-freebuf-${RELEASE_TAG}"
+          # release-please already created this release; only a hand-cut tag from
+          # the dispatch fallback still needs one.
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" \
+              "${NAME}.tar.gz" "${NAME}.tar.gz.sha256" --clobber
+          else
+            gh release create "${RELEASE_TAG}" \
+              --title "${RELEASE_TAG}" \
+              --notes-file release-notes.md \
+              "${NAME}.tar.gz" "${NAME}.tar.gz.sha256"
+          fi

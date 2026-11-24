@@ -4,7 +4,12 @@ All notable changes to Freebuf will be documented in this file.
 
 The format follows [Conventional Commits](https://www.conventionalcommits.org/).
 
-## [Unreleased]
+## [0.1.2](https://github.com/agent-of-empires/plugin-freebuf/releases/tag/v0.1.2) (2026-11-17)
+
+0.1.0 through 0.1.2 shipped without per-version entries. This section records
+what 0.1.2 contains, which is the version the Agent of Empires featured index
+pins; later versions are written by release-please from the merged commit
+subjects.
 
 ### Added
 
@@ -37,10 +42,5 @@ The format follows [Conventional Commits](https://www.conventionalcommits.org/).
 
 ### Removed
 
-- The `row-column` slot and its `ui.state.set` pushes, and `src/integration.ts` with its `AgentIntegrationSnapshot` writer. The api_version-19 route is the one that sets a row's own status, but released hosts reject the manifest that declares it.
+- The `row-column` slot and its `ui.state.set` pushes: the api_version-19 route sets a row's own status directly, so no text is written for a row.
 - The experimental `acp-adapter/` package and the CI job that tested it. It drove the Freebuff TUI through a tmux pane, which the Freebuff terms of service do not allow. Nothing in the plugin's shipped surface depended on it.
-
-### Not included
-
-- Row status (`Waiting` / `Error`) and the unread marker: a plugin cannot set them before api_version 19 (verified against aoe 1.21.0 — a written `status` hook file is ignored for a plugin-declared agent, and the row stays `Idle`).
-- Native replies stay off (`replies` omitted): explicit replies need an in-process provider extension hook Freebuff's CLI does not expose, so claiming them would be false.

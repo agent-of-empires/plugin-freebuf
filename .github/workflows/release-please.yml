@@ -1,0 +1,74 @@
+name: Release Please
+
+# Mirrors the core repo's release-plz flow. Every push to main refreshes one
+# `chore(release): X.Y.Z` PR that bumps the version in package.json,
+# package-lock.json and aoe-plugin.toml and writes CHANGELOG.md from the commit
+# subjects. Merging that PR creates the `vX.Y.Z` tag and a GitHub Release whose
+# notes are that changelog section, and the publish job below calls release.yml
+# to attach the source archive to it. Config: release-please-config.json,
+# .release-please-manifest.json.
+#
+# Publishing needs no PAT: a release created with GITHUB_TOKEN cannot start a
+# separate `release: published` workflow, so release.yml is called as a reusable
+# workflow inside this run instead. The same token does the work directly, it
+# just cannot trigger a new run. Without any release (a push to main that only
+# refreshed the PR) the publish job is skipped.
+#
+# The release PR still needs a human step. GitHub does not start `pull_request`
+# workflows for a PR opened with GITHUB_TOKEN, so `checks.yml` never reports on
+# it: close and reopen the release PR to run the required checks, or let an
+# admin merge past them.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never cancel: a cancelled run can leave the release PR half-updated.
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Update release PR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          target-branch: main
+
+      # `pr` is a JSON object carrying the release PR's title and body. Passed
+      # through the environment it is data, not shell syntax: interpolated into
+      # the script instead, the quotes in `chore(release): X.Y.Z` end the shell
+      # string and the parentheses fail the step after the PR was updated.
+      - name: Report
+        env:
+          RELEASE_CREATED: ${{ steps.release.outputs.release_created }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
+          RELEASE_PR: ${{ steps.release.outputs.pr }}
+        run: |
+          printf 'released=%s\ntag=%s\npr=%s\n' \
+            "${RELEASE_CREATED:-}" "${RELEASE_TAG:-}" "${RELEASE_PR:-}"
+
+  # Runs only when the step above actually cut a release, and reuses the same
+  # file a by-hand publish uses (`gh workflow run release.yml -f tag=vX.Y.Z`).
+  publish:
+    name: Publish ${{ needs.release-please.outputs.tag_name }}
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}
