@@ -14,13 +14,25 @@ classifies its built-in agents:
 
 | Pane | Class | Flag |
 |---|---|---|
-| `Some questions for you`, `Close ✕`, `Do you want to proceed`, `(y/n)` | waiting | raised |
-| `working...` or `thinking...` with `■ Esc` | running | lowered |
+| question dialog: caption `Some questions for you`, `Do you want to proceed`, `concurrent session limit` | waiting | raised |
+| inline prompt at the composer: `(y/n)`, `Do you want to…`, the session limit | waiting | raised |
+| error dialog: caption says error/failed | error | raised |
+| `working...` or `thinking...` with `■ Esc` above the composer | running | lowered |
 | the input prompt and its footer, nothing else | idle | lowered |
 | capture failed (no pane, CLI missing, timeout) | unknown | left alone, so it expires |
 
 A blocking dialog is checked first, because Freebuff draws it over a turn that
-is still open. The flag is the file the host reads for any session,
+is still open. It is found structurally, and only its *caption* decides: a
+boxed panel with `Close ✕` under its captioned border, with no composer drawn
+below it (a dialog replaces the composer; output the session printed does not).
+So a session that merely talks about, quotes, or prints a dialog stays
+`running`/`idle`, because a dialog the session quotes or prints is not read as
+one, and a question is never reported as an error. A confirmation asked outside a
+dialog, like `(y/n)`, or the modal Freebuff draws once the account is over its
+concurrent-session limit, counts only in the rows just above the composer,
+where the question is put to the user; the same modal drawn as a box with
+`Close ✕` is decided by its caption like any other dialog, so either way the
+session is `waiting`. The flag is the file the host reads for any session,
 plugin-declared or not: `/tmp/aoe-hooks-<euid>/<session id>/attention.json` with
 `{"urgent": true, "urgent_expires_at": <epoch secs>}`, `0600` in a `0700`
 directory, refreshed each tick while the dialog is up and decaying two minutes
@@ -185,10 +197,28 @@ and the [plugin API reference](https://agent-of-empires.com/docs/plugin-api/).
 
 ## Release
 
-Push a `v0.1.0`-style tag to run the release workflow: it
-runs checks, generates the changelog from conventional commits, and publishes a
-GitHub Release with a source archive and `sha256`. To get listed in the Agent of
-Empires featured index, see the authoring guide's publishing section.
+Releases are automated with
+[release-please](https://github.com/googleapis/release-please), the npm-side
+counterpart of the release-plz flow the Agent of Empires core repo uses, so a
+version is never bumped or tagged by hand:
+
+1. Merge to `main` with a Conventional Commit subject (`feat:`, `fix:`, ...).
+2. `release-please.yml` keeps one `chore(release): X.Y.Z` PR open that bumps
+   `package.json`, `package-lock.json` and the manifest's `version`, and writes
+   this version's `CHANGELOG.md` section from those subjects.
+3. Merging that PR creates the `vX.Y.Z` tag and a GitHub Release whose body is
+   that version's changelog section, and the same run calls `release.yml` to
+   re-run the checks, refuse a tag that disagrees with either version field, and
+   attach the source archive and its `sha256`.
+
+No personal access token or secret is required: the release is created with
+`GITHUB_TOKEN`, and `release.yml` is invoked as a reusable workflow rather than
+by an event, which is the one way to keep an action's own token doing the work
+(`GITHUB_TOKEN` cannot start a separate workflow run). To publish a version cut
+by hand, use `gh workflow run release.yml -f tag=vX.Y.Z`.
+
+To get listed in the Agent of Empires featured index, see the authoring guide's
+publishing section.
 
 ## License
 

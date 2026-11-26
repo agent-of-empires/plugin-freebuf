@@ -38,6 +38,15 @@ const IDLE_PANE = [
   " ← for history · ? for help",
 ].join("\n");
 
+/** Freebuff's failure surface, drawn in place of the composer like the question panel. */
+const ERROR_PANE = [
+  "     Row badge becomes one status icon/glyph tinted by workflow state, and the",
+  "╭────────────── Error ──────────────╮",
+  "│                        Close ✕ │",
+  "│ The agent step failed: request timed out.     │",
+  "╰───────────────────────────────────────────╯",
+].join("\n");
+
 describe("pane classification", () => {
   it("reads a blocking question modal as waiting", () => {
     expect(classifyPane(WAITING_PANE)).toBe("waiting");
@@ -159,6 +168,22 @@ describe("pane classification", () => {
     expect(classifyPane(panel)).toBe("running");
   });
 
+  it("reads a quote whose only border is the composer's as output", () => {
+    // The caption and close row were printed without a bottom border of their
+    // own, so the first border under them closes the input box: the composer is
+    // drawn, which a live dialog never leaves room for.
+    const truncated = [
+      "╭────────────── Some questions for you ──────────────╮",
+      "│                                          Close ✕ │",
+      " working...  2m 04s   ■ Esc",
+      "╭──────────────────────────────────────────╮",
+      "│  ▍Add to the current task                │",
+      "╰──────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(truncated)).toBe("running");
+    expect(classifyPane(truncated.replace(" working...  2m 04s   ■ Esc\n", ""))).toBe("idle");
+  });
+
   it("reads a tall question dialog as waiting", () => {
     // The caption sits on the top border with Close under it, so a dialog taller
     // than the pane's footer still counts, however many rows it holds.
@@ -199,6 +224,91 @@ describe("pane classification", () => {
       "╰──────────────────────────────────────────────────╯",
     ].join("\n");
     expect(classifyPane(mentioning)).toBe("waiting");
+  });
+
+  it("ignores a printed dialog above an unboxed prompt", () => {
+    // The prompt is not always drawn inside a box, and it still gives the
+    // dialog away as output: a dialog replaces whatever composer is there.
+    const printed = [
+      "  The panel reads:",
+      "╭──────────────── Some questions for you ────────────────╮",
+      "│                                                Close ✕ │",
+      "╰────────────────────────────────────────────────────────╯",
+      " ❯ Add to the current task",
+    ].join("\n");
+    expect(classifyPane(printed)).toBe("idle");
+  });
+
+  it("reads a boxed Do you want to proceed caption as waiting", () => {
+    const proceed = [
+      "╭────────────── Do you want to proceed? ──────────────╮",
+      "│                                          Close ✕ │",
+      "│  This runs the command above.                    │",
+      "╰──────────────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(proceed)).toBe("waiting");
+  });
+
+  it("leaves a dialog it does not recognise to the composer", () => {
+    // An unknown caption is not a verdict: only the dialogs known to block on
+    // the user decide, and the absence of a composer decides the rest.
+    const other = [
+      "╭────────────────── Preferences ──────────────────╮",
+      "│                                          Close ✕ │",
+      "│  Theme, model, shortcuts.                        │",
+      "╰──────────────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(other)).toBe("idle");
+  });
+
+  it("keeps a bare Close row in prose from blocking a session", () => {
+    // The close affordance on its own is not a dialog.
+    const prose = [
+      "│ Press Close ✕ in the top right of the panel to dismiss it. │",
+      "╭──────────────────────────────────────────╮",
+      "│  ▍Add to the current task                │",
+      "╰──────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(prose)).toBe("idle");
+  });
+
+  it("reads an error dialog as error, not as a question", () => {
+    expect(classifyPane(ERROR_PANE)).toBe("error");
+  });
+
+  it("keeps a question waiting when its body mentions an error", () => {
+    // Only the caption decides: a question's body is free text, and the agent's
+    // own words about a failed step do not turn the question into an error.
+    const asking = [
+      "╭────────────── Some questions for you ──────────────╮",
+      "│                                          Close ✕ │",
+      "│ ▼ The previous step failed with an error. Retry?  │",
+      "╰──────────────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(asking)).toBe("waiting");
+  });
+
+  it("reads a caption that both asks and reports as waiting", () => {
+    // The question is what blocks; a failure in the same caption does not make
+    // it an error, because the user is still the one who has to answer.
+    const both = [
+      "╭────────── Do you want to proceed? A step failed ──────────╮",
+      "│                                              Close ✕ │",
+      "╰──────────────────────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(both)).toBe("waiting");
+  });
+
+  it("leaves a caption that only names errors to the composer", () => {
+    // The caption has to say the dialog reports a failure; `Errors` on its own is
+    // not a verdict, so the absence of a composer decides.
+    const plural = [
+      "╭────────────────── Errors ──────────────────╮",
+      "│                                      Close ✕ │",
+      "│  3 rows failed to sync.                     │",
+      "╰─────────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(plural)).toBe("idle");
   });
 
   it("prefers a dialog over the working line it was drawn across", () => {
@@ -277,6 +387,35 @@ describe("pane classification", () => {
       "╰──────────────────────────────────────────╯",
     ].join("\n");
     expect(classifyPane(live)).toBe("running");
+  });
+
+  it("keeps a rhetorical question just above the composer from blocking it", () => {
+    // The window is measured at the composer, so a row close to the input counts
+    // toward it, but the question still has to end where the row does.
+    const rhetorical = [
+      "  The turn ended after 2s.",
+      "  Do you want to proceed? That depends on the cost.",
+      "╭──────────────────────────────────────────╮",
+      "│  ▍Add to the current task                │",
+      "╰──────────────────────────────────────────╯",
+    ].join("\n");
+    expect(classifyPane(rhetorical)).toBe("idle");
+  });
+
+  it("reads a prompt the session already answered as scrollback", () => {
+    // The echoed prompt and its answer look like a composer and the question is
+    // still above them, but the pane's own composer is below: only the rows above
+    // the nearest composer are read, so the answer ends the walk whether or not
+    // recap rows sit between it and the input box.
+    const exchange = ["  Do you want to proceed? (y/n)", "  │ ❯ y"];
+    const composer = [
+      "  The turn finished in 4s.",
+      "╭──────────────────────────────────────────╮",
+      "│  ▍Add to the current task                │",
+      "╰──────────────────────────────────────────╯",
+    ];
+    expect(classifyPane([...exchange, ...composer].join("\n"))).toBe("idle");
+    expect(classifyPane([...exchange, ...composer.slice(1)].join("\n"))).toBe("idle");
   });
 
   it("strips colour codes before matching", () => {
