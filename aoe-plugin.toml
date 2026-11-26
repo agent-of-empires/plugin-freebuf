@@ -7,7 +7,7 @@
 
 id = "agent-of-empires.aoe-freebuf"
 name = "Freebuf"
-version = "0.1.1"
+version = "0.1.2"
 # Manifest schema / host API version. 19 adds the provider-native agent
 # integration contract this plugin uses: `[[agent_integrations]]` plus the
 # `session.integration` capability, which lets the host read the worker's
@@ -19,8 +19,10 @@ version = "0.1.1"
 # whose send timing it would silently drop.
 api_version = 22
 # Host-app compatibility range (a different axis from api_version). The host
-# refuses install/update outside this range. Requires api_version >= 4.
-aoe_version = ">=1.21.0, <2.0.0"
+# refuses install/update outside this range. Requires api_version >= 4. The floor
+# is the first release whose API_VERSION is 22, so every host the range admits
+# parses the manifest above.
+aoe_version = ">=1.25.0, <2.0.0"
 description = "An Agent of Empires plugin for the FreeBuff coding agent."
 
 # Capability grants are prompted at install and pinned to the manifest hash.

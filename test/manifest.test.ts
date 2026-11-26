@@ -139,11 +139,10 @@ describe("aoe-plugin.toml", () => {
   });
 
   it("pins the host line that parses this schema", () => {
-    // Deliberately not raised to the release that first knows api_version 22:
-    // guessing that number wrong either blocks a host that works or admits one
-    // that does not. The manifest version is the schema gate; the floor moves
-    // in the release that ships 22.
-    expect(manifest.root.aoe_version).toBe(">=1.21.0, <2.0.0");
+    // v1.25.0 is the first release whose API_VERSION is 22, so it is the
+    // lowest host that parses this manifest. An earlier host would reject it
+    // outright, so the floor must not admit one.
+    expect(manifest.root.aoe_version).toBe(">=1.25.0, <2.0.0");
   });
 
   it("declares the capabilities its worker uses and nothing else", () => {

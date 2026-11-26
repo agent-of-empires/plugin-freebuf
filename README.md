@@ -61,11 +61,10 @@ the row's status and to expose Freebuff in `aoe agents`, the agent picker, and
 `session.default_tool`.
 
 That schema version is also the install floor. The host parses manifests
-strictly and rejects one whose schema version it does not know. `aoe_version`
-stays at `>=1.21.0, <2.0.0` because no released host parses API 22 yet: the
-latest host main is API 21, and 22 exists only in open host work. So this
-manifest cannot be released against a released host, and the `aoe_version` floor
-moves to the release that first parses 22, in the same change that ships it.
+strictly and rejects one whose schema version it does not know, so
+`aoe_version` is `>=1.25.0, <2.0.0`: v1.25.0 is the first released host that
+parses API 22, and an earlier host refuses this manifest rather than installing
+one whose send timing it would silently drop.
 `src/integration.ts` writes the report from the same pane classification as the
 attention flag, every tick; the attention flag still works on its own, so a
 session stays visible in the attention order either way.
