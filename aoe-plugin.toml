@@ -7,7 +7,7 @@
 
 id = "agent-of-empires.aoe-freebuf"
 name = "Freebuf"
-version = "0.1.2"
+version = "0.2.0"
 # Manifest schema / host API version. 19 adds the provider-native agent
 # integration contract this plugin uses: `[[agent_integrations]]` plus the
 # `session.integration` capability, which lets the host read the worker's

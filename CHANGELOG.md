@@ -4,6 +4,13 @@ All notable changes to Freebuf will be documented in this file.
 
 The format follows [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [0.2.0](https://github.com/agent-of-empires/plugin-freebuf/compare/v0.1.2...v0.2.0) (2026-11-26)
+
+
+### Features
+
+* **manifest:** declare the send-to-Enter delay for Freebuff ([#38](https://github.com/agent-of-empires/plugin-freebuf/issues/38)) ([c8a6ce9](https://github.com/agent-of-empires/plugin-freebuf/commit/c8a6ce9ff291d8c4214df73b1a3322f83a0e14ee))
+
 ## [0.1.2](https://github.com/agent-of-empires/plugin-freebuf/releases/tag/v0.1.2) (2026-11-17)
 
 0.1.0 through 0.1.2 shipped without per-version entries. This section records
